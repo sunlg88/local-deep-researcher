@@ -20,7 +20,7 @@ class Base(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.cfg = Settings(allowed_domains=['example.org', 'example.net'], min_sources=1, min_tasks=1, max_tasks=3, max_attempts=2)
+        self.cfg = Settings(source_mode='allowlist', allowed_domains=['example.org', 'example.net'], min_sources=1, min_tasks=1, max_tasks=3, max_attempts=2)
         self.store = Store(self.root)
         self.pid = self.store.create('Synthetic fixture study', self.cfg)
         self.task = {'criteria': [{'id': 'c1', 'text': 'Identify capacity'}]}
@@ -41,6 +41,22 @@ class Contracts(Base):
     def test_allowlist_domain_boundary(self):
         self.assertFalse(self.cfg.allows('https://example.org.evil.test/a'))
         self.assertTrue(self.cfg.allows('https://sub.example.org/a'))
+    def test_open_mode_allows_empty_domain_list(self):
+        cfg = Settings(source_mode='open', allowed_domains=[])
+        self.assertTrue(cfg.allows('https://example.org/a'))
+        self.assertEqual(cfg.search_query('부산 사하구 맛집'), '부산 사하구 맛집')
+    def test_preferred_mode_allows_general_web_and_ranks_preferred_first(self):
+        cfg = Settings(source_mode='preferred', allowed_domains=['official.example'])
+        self.assertTrue(cfg.allows('https://restaurant.example/a'))
+        hits = [{'url':'https://restaurant.example/a'}, {'url':'https://official.example/b'}]
+        self.assertEqual(cfg.rank_hits(hits)[0]['url'], 'https://official.example/b')
+    def test_allowlist_mode_requires_domain(self):
+        with self.assertRaises(ValueError): Settings(source_mode='allowlist', allowed_domains=[])
+    def test_legacy_saved_settings_stay_allowlist_only(self):
+        legacy = self.cfg.to_dict(); legacy.pop('source_mode')
+        loaded = Settings.from_saved(legacy)
+        self.assertEqual(loaded.source_mode, 'allowlist')
+        self.assertFalse(loaded.allows('https://restaurant.example/a'))
     def test_unknown_evidence_fails_gate(self):
         ok, reasons, ids = gate(self.task, [], review(['invented']), self.cfg)
         self.assertFalse(ok); self.assertTrue(reasons); self.assertEqual(ids, [])
