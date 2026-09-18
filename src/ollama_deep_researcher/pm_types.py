@@ -1,0 +1,142 @@
+"""Validated PM contracts. Mechanical checks are not scientific truth tests."""
+from dataclasses import asdict, dataclass, field
+import json
+import re
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+
+@dataclass
+class Settings:
+    model: str = 'qwen3.5:9b'
+    ollama_url: str = 'http://localhost:11434'
+    search_api: str = 'duckduckgo'
+    allowed_domains: list[str] = field(default_factory=lambda: [
+        'energy.gov', 'osti.gov', 'iaea.org', 'nrel.gov', 'jstage.jst.go.jp',
+        'sciencedirect.com', 'nature.com', 'science.org', 'springer.com'])
+    min_sources: int = 2
+    min_tasks: int = 5
+    max_tasks: int = 8
+    max_attempts: int = 3
+    max_calls: int = 240
+    max_searches: int = 60
+    context_tokens: int = 8192
+    output_tokens: int = 3072
+    report_minutes: int = 15
+    think: bool = True
+    request_timeout: int = 300
+    source_chars: int = 3500
+    source_limit: int = 3
+
+    def __post_init__(self):
+        limits = {'min_sources': (1, 10), 'min_tasks': (1, 20), 'max_tasks': (1, 20),
+                  'max_attempts': (1, 20), 'max_calls': (1, 100000), 'max_searches': (1, 100000),
+                  'context_tokens': (4096, 131072), 'output_tokens': (512, 16384),
+                  'report_minutes': (1, 1440), 'request_timeout': (10, 3600),
+                  'source_chars': (500, 20000), 'source_limit': (1, 10)}
+        for name, (low, high) in limits.items():
+            value = getattr(self, name)
+            if type(value) is not int or not low <= value <= high:
+                raise ValueError(f'{name}: integer in {low}..{high} required')
+        if self.min_tasks > self.max_tasks or self.output_tokens + 2048 > self.context_tokens:
+            raise ValueError('Task limits or input/output context reservation is invalid')
+        if self.search_api not in ('duckduckgo', 'searxng', 'tavily'):
+            raise ValueError('Unsupported search adapter')
+        if not isinstance(self.model, str) or not self.model.strip():
+            raise ValueError('An installed Ollama model name is required')
+        if type(self.think) is not bool:
+            raise ValueError('think must be boolean')
+        canonical_url(self.ollama_url)
+        domains = []
+        for domain in self.allowed_domains:
+            if not isinstance(domain, str):
+                raise ValueError('Domain allowlist must contain strings')
+            domain = domain.strip().lower().rstrip('.')
+            if not re.fullmatch(r'[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?', domain) or '.' not in domain:
+                raise ValueError(f'Use explicit domains, not URLs or wildcards: {domain}')
+            domains.append(domain)
+        self.allowed_domains = sorted(set(domains))
+        if not self.allowed_domains:
+            raise ValueError('At least one explicitly allowed source domain is required')
+
+    def group(self, url):
+        host = (urlsplit(url).hostname or '').lower().rstrip('.')
+        matches = [d for d in self.allowed_domains if host == d or host.endswith('.' + d)]
+        return min(matches, key=len) if matches else None
+
+    def allows(self, url):
+        try:
+            canonical_url(url)
+            return self.group(url) is not None
+        except ValueError:
+            return False
+
+    def to_dict(self):
+        return asdict(self)
+
+
+def canonical_url(url):
+    if not isinstance(url, str) or len(url) > 4096:
+        raise ValueError('Invalid URL')
+    p = urlsplit(url.strip())
+    if p.scheme not in ('http', 'https') or not p.hostname or p.username or p.password:
+        raise ValueError('Only HTTP(S) URLs without credentials are allowed')
+    host = p.hostname.lower().rstrip('.')
+    if ':' in host:
+        host = '[' + host + ']'
+    port = p.port
+    if port and not (p.scheme == 'https' and port == 443 or p.scheme == 'http' and port == 80):
+        host += ':' + str(port)
+    query = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True)
+             if not k.lower().startswith('utm_') and k.lower() not in ('fbclid', 'gclid')]
+    return urlunsplit((p.scheme.lower(), host, p.path or '/', urlencode(sorted(query)), ''))
+
+
+def normalized(text):
+    return ' '.join(str(text).split())
+
+
+def parse_json(text):
+    if not isinstance(text, str):
+        raise ValueError('Model returned non-text content')
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+    if text.startswith('```') and text.endswith('```'):
+        text = re.sub(r'^```(?:json)?\s*', '', text).removesuffix('```').strip()
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise ValueError('A JSON object is required')
+    return value
+
+
+def gate(task, evidence, review, settings):
+    """Fail closed; a critic cannot waive source, quote, conflict or coverage rules."""
+    reasons, selected = [], set()
+    rows = {e['id']: e for e in evidence}
+    checks = review.get('checks', [])
+    if not isinstance(checks, list):
+        return False, ['Critic checks must be a list'], []
+    for criterion in task['criteria']:
+        match = [c for c in checks if isinstance(c, dict) and c.get('criterion') == criterion['id']]
+        if len(match) != 1:
+            reasons.append(f"{criterion['id']}: missing or duplicated review")
+            continue
+        c = match[0]
+        ids = c.get('evidence_ids', [])
+        if c.get('passed') is not True or not isinstance(ids, list) or not ids:
+            reasons.append(f"{criterion['id']}: {str(c.get('reason', 'unsupported'))[:300]}")
+            continue
+        valid = True
+        for eid in ids:
+            row = rows.get(eid) if isinstance(eid, str) else None
+            if not row or not settings.allows(row['url']) or row.get('conflict'):
+                reasons.append(f"{criterion['id']}: unknown/disallowed/conflicting evidence {eid}")
+                valid = False
+        if valid:
+            selected.update(ids)
+    chosen = [rows[eid] for eid in selected]
+    groups = {settings.group(e['url']) for e in chosen}
+    hashes = {e['content_hash'] for e in chosen}
+    if min(len(groups), len(hashes)) < settings.min_sources:
+        reasons.append(f'Need {settings.min_sources} distinct allowed source groups and document bodies')
+    if review.get('issues'):
+        reasons.append('Critic raised unresolved issues: ' + str(review['issues'])[:800])
+    return not reasons, reasons, sorted(selected)

@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+.pm-venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+pm_data/
+projects/
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+worker.lock
