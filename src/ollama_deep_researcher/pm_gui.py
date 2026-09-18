@@ -13,6 +13,9 @@ from .pm_io import Ollama, Web
 from .pm_store import Store
 from .pm_types import Settings
 
+SOURCE_MODE_LABELS = {'일반 웹 조사': 'open', '신뢰 도메인 우선': 'preferred', '허용 도메인 전용': 'allowlist'}
+SOURCE_MODE_NAMES = {value: label for label, value in SOURCE_MODE_LABELS.items()}
+
 STATUS = {'PENDING': '\ub300\uae30', 'RUNNING': '\uc9c4\ud589 \uc911',
           'PAUSED': '\uc77c\uc2dc\uc815\uc9c0', 'STOPPED': '\uc911\uc9c0\ub428',
           'DONE': '\uac80\ud1a0 \ud1b5\uacfc', 'RETRY': '\uc7ac\uc870\uc0ac',
@@ -52,9 +55,11 @@ class App:
         self.model_box.grid(row=0, column=2, padx=6)
         ttk.Button(box, text='\uc5f0\uacb0 / \ubaa8\ub378 \ucc3e\uae30', command=self.connect).grid(row=0, column=3, padx=6)
         ttk.Combobox(box, textvariable=self.search, values=('duckduckgo','searxng','tavily'), state='readonly', width=13).grid(row=0, column=4, padx=6)
-        ttk.Label(box, text='\ud5c8\uc6a9 \ub3c4\uba54\uc778').grid(row=1, column=0, sticky='w', pady=8)
-        ttk.Entry(box, textvariable=self.domains).grid(row=1, column=1, columnspan=4, sticky='ew', padx=6)
-        ttk.Label(box, text='\ud68c\uc0ac \uc870\uc0ac\ub294 \ud574\ub2f9 \uacf5\uc2dd \ub3c4\uba54\uc778\ub3c4 \ucd94\uac00\ud558\uc138\uc694. URL \uc804\uccb4 \ub300\uc2e0 example.org \ud615\uc2dd, \uc27c\ud45c\ub85c \uad6c\ubd84.').grid(row=2, column=0, columnspan=5, sticky='w')
+        ttk.Label(box, text='출처 정책').grid(row=1, column=0, sticky='w', pady=8)
+        ttk.Combobox(box, textvariable=self.source_policy, values=tuple(SOURCE_MODE_LABELS), state='readonly', width=18).grid(row=1, column=1, sticky='w', padx=6)
+        ttk.Label(box, text='선호 / 허용 도메인').grid(row=1, column=2, sticky='e', padx=(12,0))
+        ttk.Entry(box, textvariable=self.domains).grid(row=1, column=3, columnspan=2, sticky='ew', padx=6)
+        ttk.Label(box, text='일반 웹 조사는 공란으로 바로 실행 가능. 업무 자료는 신뢰 도메인 우선, 엄격 제한이 필요할 때만 허용 도메인 전용을 선택하세요.').grid(row=2, column=0, columnspan=5, sticky='w')
         rows = [(
             ('\ucd5c\uc18c \ucd9c\ucc98', 'min_sources'), ('\ucd5c\ub300 \uc2dc\ub3c4', 'max_attempts'),
             ('\ubcf4\uace0 \uac04\uaca9(\ubd84)', 'report_minutes'), ('Context', 'context_tokens'), ('Output', 'output_tokens')),
@@ -81,7 +86,7 @@ class App:
             ttk.Button(buttons, text=text, command=command).pack(side='left', padx=5)
         self.saved = ttk.Combobox(buttons, state='readonly', width=32); self.saved.pack(side='right')
         self.saved.bind('<<ComboboxSelected>>', self.select_saved)
-        self.status = tk.StringVar(value='\uc5f0\uad6c \uc8fc\uc81c\uc640 \ud5c8\uc6a9 \ucd9c\ucc98\ub97c \uc124\uc815\ud558\uace0 Ollama \uc5f0\uacb0\uc744 \ud655\uc778\ud558\uc138\uc694.')
+        self.status = tk.StringVar(value='연구 주제를 입력하고 Ollama 연결을 확인하세요. 일반 웹 조사는 도메인 입력이 필요 없습니다.')
         ttk.Label(outer, textvariable=self.status, wraplength=1120).pack(anchor='w', pady=10)
         tabs = ttk.Notebook(outer); tabs.pack(fill='both', expand=True)
         task_tab, report_tab, log_tab = [ttk.Frame(tabs) for _ in range(3)]
