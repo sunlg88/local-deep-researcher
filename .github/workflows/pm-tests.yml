@@ -2,9 +2,9 @@ name: Research PM Tests
 
 on:
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "feature/research-pm-phase1" ]
   push:
-    branches: [ "feature/research-pm-phase1" ]
+    branches: [ "feature/research-pm-phase1", "feature/research-pm-v06-optimization" ]
   workflow_dispatch:
 
 permissions:
@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   pm-tests:
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -33,6 +34,8 @@ jobs:
             tests/
             docs/
             pyproject.toml
+            README.md
+            LICENSE
             RESEARCH_PM_KO.md
             START_RESEARCH_PM.bat
             INSTALL_PM_DEPENDENCIES.bat

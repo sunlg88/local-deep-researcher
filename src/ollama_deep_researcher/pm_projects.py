@@ -101,11 +101,13 @@ class Workspace:
             result.append(state)
         return sorted(result, key=lambda p: p.get('created', ''), reverse=True)
 
-    def create(self, topic, settings, instructions='', reference_projects=()):
+    def create(self, topic, settings, instructions='', reference_projects=(), *, engine_version=5):
         from .pm_types import validate_research_input
         from .pm_budget import preflight_research_start
         validate_research_input(topic,instructions)
-        preflight_research_start(settings,topic,instructions)
+        if engine_version not in (5, 6):
+            raise ValueError('Unsupported project engine version')
+        preflight_research_start(settings,topic,instructions,version=engine_version)
         if isinstance(reference_projects, (str, bytes)):
             raise ValueError('Reference projects must be a list of project IDs')
         refs = list(dict.fromkeys(reference_projects))
@@ -123,15 +125,32 @@ class Workspace:
             state = store.load(pid)
             state['reference_projects'] = refs
             state['schema_version'] = 3
-            state['engine_version'] = 5
+            state['engine_version'] = engine_version
             from .pm_research_metrics import initialize
             initialize(store)
+            if engine_version == 6:
+                from .pm_v06_store import initialize as initialize_v06
+                initialize_v06(store)
             store.save(state)
             stage.rename(folder)
         except BaseException:
             shutil.rmtree(stage, ignore_errors=True)
             raise
         return pid
+
+    def create_v06(self, topic, settings, instructions='', reference_projects=()):
+        return self.create(topic, settings, instructions, reference_projects, engine_version=6)
+
+    def continue_as_v06(self, source_project_id, settings=None):
+        from .pm_types import Settings
+        original = self.load(source_project_id)
+        if original.get('engine_version', 4) >= 6:
+            raise ValueError('Use resume for an existing v0.6 project')
+        folder = self.project_path(source_project_id)
+        lock = worker_lock(folder) if (folder / 'worker.lock').exists() else nullcontext()
+        with lock:
+            return self.create_v06(original['topic'], settings or Settings.from_saved(original['settings']),
+                                   original.get('instructions', ''), [source_project_id])
 
     def continue_as_v05(self, legacy_project_id, settings=None):
         from .pm_types import Settings

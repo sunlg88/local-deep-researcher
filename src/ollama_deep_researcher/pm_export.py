@@ -94,7 +94,16 @@ def _export_project(store, pid):
     write_json('candidates.json', candidates)
     write_json('source_records.json', sources)
     write_json('processing.json', store.processing())
-    events = store.events(pid, limit=500)
+    if state.get('engine_version') == 6:
+        with store.db() as conn:
+            events = [dict(row) for row in conn.execute(
+                'SELECT * FROM events WHERE project_id=? ORDER BY seq', (pid,))]
+        from .pm_export_v06 import export_details as export_v06_details
+        efficiency, extra_gaps = export_v06_details(store,state,documents,evidence,events,folder,
+                                                   write_text,write_json,csv_cell)
+        quality_gaps += extra_gaps
+    else:
+        events = store.events(pid, limit=500)
     write_text('events.jsonl', '\n'.join(json.dumps(event, ensure_ascii=False) for event in events) + '\n')
     output = io.StringIO(newline='')
     columns = ['url', 'original_url', 'final_url', 'title', 'status', 'document_id', 'queries',

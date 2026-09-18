@@ -71,6 +71,11 @@ def passage(text, query, chars):
 
 
 class Web:
+    worker_module = "ollama_deep_researcher.pm_search_worker"
+
+    def search_reply(self, data):
+        return data.get("results", [])
+
     def __init__(self, settings):
         self.settings = settings
         self.check = lambda: None
@@ -85,7 +90,7 @@ class Web:
             request_path.write_text(json.dumps({'backend': self.settings.search_api,
                 'query': search_query, 'max_results': self.settings.source_limit * 3}), encoding='utf-8')
             with open(Path(folder) / 'worker.log', 'wb') as log:
-                process = subprocess.Popen([sys.executable, '-m', 'ollama_deep_researcher.pm_search_worker',
+                process = subprocess.Popen([sys.executable, '-m', self.worker_module,
                                             str(request_path), str(result_path)], stdout=log, stderr=log)
                 start = time.monotonic()
                 try:
@@ -101,7 +106,7 @@ class Web:
                     if not result_path.exists() or result_path.stat().st_size > 2_000_000:
                         raise ValueError('Search adapter returned missing or excessive data')
                     data = json.loads(result_path.read_text(encoding='utf-8'))
-                    results = data.get('results', [])
+                    results = self.search_reply(data)
                     if not isinstance(results, list):
                         raise ValueError('Search adapter returned invalid results')
                     return self.settings.rank_hits(results)

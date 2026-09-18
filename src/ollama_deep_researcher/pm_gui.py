@@ -10,6 +10,8 @@ from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 from .pm_engine import TERMINAL
 from .pm_engine_v05 import EngineV05 as Engine
+from .pm_engine_v06 import EngineV06
+from .pm_io_v06 import WebV06
 from .pm_budget import preflight_research_start
 from . import pm_research_metrics as metrics
 from .pm_io import Ollama, Web
@@ -18,6 +20,8 @@ from .pm_types import Settings, MAX_INSTRUCTION_BYTES, validate_research_input
 
 SOURCE_MODE_LABELS = {'일반 웹 조사': 'open', '신뢰 도메인 우선': 'preferred', '허용 도메인 전용': 'allowlist'}
 SOURCE_MODE_NAMES = {value: label for label, value in SOURCE_MODE_LABELS.items()}
+OPTIMIZATION_LABELS = {'\ud6a8\uc728 \uc6b0\uc120':'efficient','\uade0\ud615':'balanced','\ud488\uc9c8 \uc6b0\uc120':'quality'}
+OPTIMIZATION_NAMES = {value: key for key,value in OPTIMIZATION_LABELS.items()}
 
 STATUS = {'PENDING': '\ub300\uae30', 'RUNNING': '\uc9c4\ud589 \uc911',
           'PAUSED': '\uc77c\uc2dc\uc815\uc9c0', 'STOPPED': '\uc911\uc9c0\ub428',
@@ -26,7 +30,7 @@ STATUS = {'PENDING': '\ub300\uae30', 'RUNNING': '\uc9c4\ud589 \uc911',
           'COMPLETED_REVIEW_REQUIRED': '\uc885\ub8cc / \uc0ac\ub78c \uac80\ud1a0 \ud544\uc694',
           'BUDGET_EXHAUSTED': '\uc791\uc5c5 \ud55c\ub3c4 \ub3c4\ub2ec', 'ERROR': '\uc624\ub958 / \uc7ac\uac1c \uac00\ub2a5'}
 
-STATUS.update({'COLLECTED':'자료 축적 / 후처리 필요', 'NO_FINDINGS':'원문 추가 확인 필요',
+STATUS.update({'STALLED':'\uc0c8 \uadfc\uac70 \ubd80\uc871 / \ubcf4\ub958','COLLECTED':'자료 축적 / 후처리 필요', 'NO_FINDINGS':'원문 추가 확인 필요',
     'NO_NEW_WORK':'현재 범위에서 새 작업 없음', 'TIME_LIMIT_REACHED':'실행 시간 한도',
     'STORAGE_ERROR':'저장 오류 / 안전 정지',
     'INPUT_BUDGET_BLOCKED':'\uc785\ub825 \uc608\uc0b0 \ubd80\uc871 / \uc124\uc815 \ud655\uc778'})
@@ -42,14 +46,14 @@ class App:
         self._metric_cache = {}
         self.reference_label = tk.StringVar(value='참조 프로젝트: 선택 없음 (완전 독립)')
         self.refresh_token = None
-        root.title('Research PM 0.5 - \uadfc\uac70 \uc911\uc2ec \uc5f0\uad6c\uc2e4')
+        root.title('Research PM 0.6 - \uadfc\uac70 \uc911\uc2ec \uc5f0\uad6c\uc2e4')
         root.geometry('1200x880'); root.minsize(1050, 760)
         style = ttk.Style(root); style.theme_use('clam')
         style.configure('.', font=('Malgun Gothic', 10))
         style.configure('Treeview', rowheight=32)
         style.configure('Title.TLabel', font=('Malgun Gothic', 20, 'bold'))
         outer = ttk.Frame(root, padding=16); outer.pack(fill='both', expand=True)
-        ttk.Label(outer, text='Research PM 0.5  |  원문을 쌓는 리서치 연구실', style='Title.TLabel').pack(anchor='w')
+        ttk.Label(outer, text='Research PM 0.6  |  원문을 쌓는 리서치 연구실', style='Title.TLabel').pack(anchor='w')
         ttk.Label(outer, text='\uacc4\ud68d > \uc870\uc0ac > \ucd94\ucd9c > \ube44\ud310 \uac80\ud1a0 > \uc885\ud569  |  \ub3d9\uc77c \ubaa8\ub378 \uc21c\ucc28 \uc2e4\ud589  |  \ucd5c\uc885 \uc0ac\ub78c \uac80\ud1a0 \ud544\uc218').pack(anchor='w', pady=(5,12))
         cfg = Settings()
         self.url = tk.StringVar(value=cfg.ollama_url)
@@ -58,6 +62,10 @@ class App:
         self.source_policy = tk.StringVar(value=SOURCE_MODE_NAMES[cfg.source_mode])
         self.domains = tk.StringVar(value=', '.join(cfg.allowed_domains))
         self.think = tk.BooleanVar(value=True)
+        self.optimization_mode = tk.StringVar(value=OPTIMIZATION_NAMES[cfg.optimization_mode])
+        self.semantic_rerank = tk.StringVar(value=cfg.semantic_rerank)
+        self.semantic_backend = tk.StringVar(value=cfg.semantic_backend)
+        self.semantic_model = tk.StringVar(value=cfg.semantic_model)
         self.values = {k: tk.StringVar(value=str(getattr(cfg, k))) for k in (
             'min_sources', 'max_attempts', 'report_minutes', 'context_tokens',
             'output_tokens', 'max_calls', 'max_searches', 'min_tasks', 'max_tasks', 'time_limit_minutes')}
@@ -96,6 +104,17 @@ class App:
         flags=ttk.Frame(self.advanced);flags.pack(anchor='w')
         ttk.Checkbutton(flags,text='최종 초안에만 엄격 출처 필터 (원문은 보존)',variable=self.strict_final).pack(side='left')
         ttk.Checkbutton(flags,text='참고용 요약 초안 생성',variable=self.draft_enabled).pack(side='left',padx=16)
+        modes=ttk.Frame(box);modes.grid(row=5,column=0,columnspan=5,sticky='w',pady=6)
+        ttk.Label(modes,text='\ucd5c\uc801\ud654 \ubaa8\ub4dc').pack(side='left',padx=(0,8))
+        ttk.Combobox(modes,textvariable=self.optimization_mode,values=tuple(OPTIMIZATION_LABELS),
+                     state='readonly',width=13).pack(side='left')
+        ttk.Label(modes,text='  \uc0c8 \uc5f0\uad6c\uc5d0 \uc801\uc6a9 / \uc6d0\ubb38\uc740 \ubcf4\uc874 / \uae30\ubcf8 \uc758\ubbf8 \uac80\uc0c9 OFF').pack(side='left',padx=8)
+        semantic=ttk.Frame(self.advanced);semantic.pack(anchor='w',pady=4)
+        ttk.Label(semantic,text='\uc758\ubbf8 \uc7ac\uc815\ub82c (\uc2e4\ud5d8)').pack(side='left',padx=(0,8))
+        ttk.Combobox(semantic,textvariable=self.semantic_rerank,values=('off','auto','on'),state='readonly',width=6).pack(side='left')
+        ttk.Combobox(semantic,textvariable=self.semantic_backend,values=('cpu','ollama'),state='readonly',width=8).pack(side='left',padx=5)
+        ttk.Entry(semantic,textvariable=self.semantic_model,width=37).pack(side='left')
+        ttk.Label(semantic,text='  \ub85c\uceec \ubaa8\ub378 \uacbd\ub85c/\uc124\uce58\ub41c \ubaa8\ub378\uba85').pack(side='left')
         self.advanced.grid_remove()
         box.columnconfigure(4, weight=1)
         topic_box = ttk.LabelFrame(outer, text='2. \uc5f0\uad6c \uc9c0\uc2dc', padding=10); topic_box.pack(fill='x', pady=10)
@@ -116,12 +135,14 @@ class App:
         self.pause_button = ttk.Button(buttons, text='\uc77c\uc2dc\uc815\uc9c0', command=lambda: self.control('PAUSE')); self.pause_button.pack(side='left', padx=5)
         for text, command in [('\uc911\uc9c0', lambda: self.control('STOP')), ('\uc120\ud0dd \uc5f0\uad6c \uc7ac\uac1c', self.resume), ('\uacb0\uacfc \ud3f4\ub354', self.open_results)]:
             ttk.Button(buttons, text=text, command=command).pack(side='left', padx=5)
-        self.continue_button = ttk.Button(buttons,text='0.5 방식으로 이어서 조사',command=self.continue_legacy)
+        self.continue_button = ttk.Button(buttons,text='0.6 방식으로 이어서 조사',command=self.continue_legacy)
         self.continue_button.pack(side='left',padx=5)
         self.saved = ttk.Combobox(buttons, state='readonly', width=32); self.saved.pack(side='right')
         self.saved.bind('<<ComboboxSelected>>', self.select_saved)
         self.status = tk.StringVar(value='연구 주제를 입력하고 Ollama 연결을 확인하세요. 일반 웹 조사는 도메인 입력이 필요 없습니다.')
         ttk.Label(outer, textvariable=self.status, wraplength=1120).pack(anchor='w', pady=10)
+        self.efficiency_status=tk.StringVar(value='v0.6 / \uc2e4\uc81c \uc870\uc0ac \ud488\uc9c8\uc740 \uc6d0\ubb38\uc73c\ub85c \ud655\uc778\ud558\uc138\uc694.')
+        ttk.Label(outer,textvariable=self.efficiency_status,wraplength=1120).pack(anchor='w',pady=(0,6))
         tabs = ttk.Notebook(outer); tabs.pack(fill='both', expand=True)
         task_tab, report_tab, log_tab = [ttk.Frame(tabs) for _ in range(3)]
         for frame, label in [(task_tab,'\uacfc\uc81c \ud604\ud669'), (report_tab,'\uacb0\uacfc / \uadfc\uac70'), (log_tab,'\uc2e4\ud589 \uae30\ub85d')]: tabs.add(frame, text=label)
@@ -143,7 +164,10 @@ class App:
         return Settings(model=self.model.get().strip(), ollama_url=self.url.get().strip(), search_api=self.search.get(),
                         source_mode=SOURCE_MODE_LABELS[self.source_policy.get()],
                         allowed_domains=[d.strip() for d in self.domains.get().split(',') if d.strip()], think=self.think.get(),
-                        strict_final=self.strict_final.get(), draft_enabled=self.draft_enabled.get(), **values)
+                        strict_final=self.strict_final.get(), draft_enabled=self.draft_enabled.get(),
+                        optimization_mode=OPTIMIZATION_LABELS[self.optimization_mode.get()],
+                        semantic_rerank=self.semantic_rerank.get(),semantic_backend=self.semantic_backend.get(),
+                        semantic_model=self.semantic_model.get().strip(), **values)
 
     def toggle_advanced(self):
         if self.advanced.winfo_ismapped(): self.advanced.grid_remove()
@@ -183,9 +207,10 @@ class App:
         threading.Thread(target=lookup,daemon=True).start()
 
     def launch(self):
-        pid = self.pid; cfg = Settings.from_saved(self.store.load(pid)['settings'])
+        pid = self.pid; state = self.store.load(pid); cfg = Settings.from_saved(state['settings'])
+        engine_class, web_class = (EngineV06, WebV06) if state.get('engine_version')==6 else (Engine,Web)
         def work():
-            try: Engine(self.store.open(pid),Ollama(cfg),Web(cfg)).run(pid)
+            try: engine_class(self.store.open(pid),Ollama(cfg),web_class(cfg)).run(pid)
             except Exception as exc: self.messages.put(('error',str(exc)))
         self.worker = threading.Thread(target=work,daemon=True); self.worker.start()
 
@@ -204,9 +229,8 @@ class App:
             cfg = self.settings()
             instructions = self.instructions.get('1.0', 'end-1c').strip()
             validate_research_input(self.topic.get(), instructions)
-            preflight_research_start(cfg,self.topic.get(),instructions)
-            from . import utils  # Only import after input validation; never confuse the two errors.
-            self.pid = self.store.create(self.topic.get(), cfg, instructions, reference_projects=self.reference_ids)
+            preflight_research_start(cfg,self.topic.get(),instructions,version=6)
+            self.pid = self.store.create_v06(self.topic.get(), cfg, instructions, reference_projects=self.reference_ids)
             self.reload_projects()
             self.launch()
         except ValueError as exc:
@@ -217,7 +241,7 @@ class App:
 
     def control(self,action):
         if self.pid and self.store.load(self.pid).get('engine_version',4)<5:
-            messagebox.showinfo('Research PM','기존 연구는 읽기 전용입니다. 0.5 이어서 조사를 사용하세요.')
+            messagebox.showinfo('Research PM','기존 연구는 읽기 전용입니다. 0.6 이어서 조사를 사용하세요.')
             return
         if self.pid:
             self.store.control(self.pid,action)
@@ -228,7 +252,7 @@ class App:
             return
         s = self.store.load(self.pid)
         if s.get('engine_version',4)<5:
-            messagebox.showinfo('Research PM','기존 연구는 변경하지 않습니다. 0.5 방식으로 이어서 조사 버튼을 사용하세요.')
+            messagebox.showinfo('Research PM','기존 연구는 변경하지 않습니다. 0.6 방식으로 이어서 조사 버튼을 사용하세요.')
             return
         if s['status'] in TERMINAL - {'INPUT_BUDGET_BLOCKED'}:
             messagebox.showinfo('Research PM',
@@ -256,7 +280,7 @@ class App:
         if self.busy() or not self.pid:
             return
         try:
-            self.pid=self.store.continue_as_v05(self.pid)
+            self.pid=self.store.continue_as_v06(self.pid,self.settings())
             self.reload_projects()
             self.select_saved()
             self.launch()
@@ -279,6 +303,9 @@ class App:
             self.search.set(cfg['search_api']); self.source_policy.set(SOURCE_MODE_NAMES[cfg.get('source_mode', 'allowlist')])
             self.domains.set(', '.join(cfg['allowed_domains'])); self.think.set(cfg['think'])
             defaults=Settings.from_saved(cfg)
+            self.optimization_mode.set(OPTIMIZATION_NAMES[defaults.optimization_mode])
+            self.semantic_rerank.set(defaults.semantic_rerank);self.semantic_backend.set(defaults.semantic_backend)
+            self.semantic_model.set(defaults.semantic_model)
             for k,v in self.values.items(): v.set(str(getattr(defaults,k)))
             self.strict_final.set(defaults.strict_final);self.draft_enabled.set(defaults.draft_enabled)
             self.reference_ids=list(s.get('reference_projects',[]));self.update_reference_label()
@@ -303,7 +330,7 @@ class App:
                     local=self.store.open(self.pid);self._view_stores[self.pid]=local
                 counts=local.counts()
                 legacy=s.get('engine_version',4)<5
-                self.continue_button.configure(state='normal' if legacy and not self.busy() else 'disabled')
+                self.continue_button.configure(state='normal' if s.get('engine_version',4)<6 and not self.busy() else 'disabled')
                 pending_review=sum(len(set(t.get('evidence_ids',[]))-set(t.get('reviewed_ids',[]))) for t in s['tasks'])
                 failed=sum(bool(row.get('error')) for row in local.sources())
                 pending = '' if s['control']=='RUN' else ' | '+s['control']+' requested'
@@ -313,6 +340,9 @@ class App:
                 cached=self._metric_cache.get(self.pid)
                 if not legacy and (cached is None or cached[0]!=stamp or time.monotonic()-cached[1]>3):
                     global_metrics=metrics.project_metrics(local)
+                    if s.get('engine_version')==6:
+                        from .pm_v06_store import project_counters
+                        global_metrics.update(project_counters(local))
                     per_task={t['id']:metrics.task_metrics(local,t['id']) for t in s['tasks']}
                     self._metric_cache[self.pid]=(stamp,time.monotonic(),global_metrics,per_task)
                 if legacy:
@@ -323,6 +353,15 @@ class App:
                     ratio=m['productive_extraction_ratio']
                     ratio_label='-' if ratio is None else f'{ratio:.1%}'
                     self.status.set(self.status.get()+f" | 선별 {m['hits_screened']} / 제외 {m['prefilter_rejected']} | 중복 수집 절약 {m['duplicate_fetch_avoided']} | 유효 추출 {ratio_label}")
+                if s.get('engine_version')==6:
+                    self.efficiency_status.set(
+                        f"v0.6 / {s['settings'].get('optimization_mode','balanced')} | "
+                        f"\ubcf4\ub958 \ubb38\uc11c {m.get('deferred_documents',0)} | "
+                        f"\ub3d9\uc77c \ubcf8\ubb38 \uc7ac\uc0ac\uc6a9 {m.get('duplicate_bodies_avoided',0)} | "
+                        f"\ubbf8\uc5f4\ub78c \ubb38\uc790 {m.get('unread_characters',0):,} "
+                        "| \uc0c1\uc138 \uc9c0\ud45c: efficiency_metrics.json")
+                else:
+                    self.efficiency_status.set('\uae30\uc874 \uc5d4\uc9c4 \uc720\uc9c0 / 0.6 \uc774\uc5b4\uc11c \uc870\uc0ac\ub294 \uc0c8 \ud504\ub85c\uc81d\ud2b8\ub85c \uc0dd\uc131')
                 self.table.delete(*self.table.get_children())
                 for t in s['tasks']:
                     tm=per_task.get(t['id'],{})

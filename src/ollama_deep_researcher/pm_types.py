@@ -48,8 +48,18 @@ class Settings:
     strict_final: bool = False
     draft_enabled: bool = True
     max_source_bytes: int = 20_000_000
+    optimization_mode: str = 'balanced'
+    semantic_rerank: str = 'off'
+    semantic_backend: str = 'cpu'
+    semantic_model: str = ''
 
     def __post_init__(self):
+        if self.optimization_mode not in ('efficient', 'balanced', 'quality'):
+            raise ValueError('Invalid optimization mode')
+        if self.semantic_rerank not in ('off', 'auto', 'on') or self.semantic_backend not in ('cpu', 'ollama'):
+            raise ValueError('Invalid semantic retrieval configuration')
+        if not isinstance(self.semantic_model, str) or (self.semantic_rerank != 'off' and not self.semantic_model.strip()):
+            raise ValueError('Optional semantic retrieval requires an explicitly installed model')
         limits = {'min_sources': (1, 10), 'min_tasks': (1, 20), 'max_tasks': (1, 20),
                   'max_attempts': (1, 20), 'max_calls': (1, 100000), 'max_searches': (1, 100000),
                   'context_tokens': (4096, 131072), 'output_tokens': (512, 16384),

@@ -10,7 +10,7 @@ import json
 import math
 import re
 
-from .pm_prompts import BOUNDARY, PROMPTS, SCHEMAS, V05_PROMPTS, V05_SCHEMAS, PromptBudgetError
+from .pm_prompts import BOUNDARY, PROMPTS, SCHEMAS, V05_PROMPTS, V05_SCHEMAS, V06_PROMPTS, V06_SCHEMAS, PromptBudgetError
 
 POLICY_VERSION = 1
 RESERVE_TOKENS = 768
@@ -49,7 +49,7 @@ def estimate_tokens(text, model='qwen3.5:9b'):
 
 def schema_for(role, payload):
     """Match the actual task/claim batch, not a global twenty-task schema."""
-    schema = deepcopy((V05_SCHEMAS if payload.get('_pm_version') == 5 else SCHEMAS)[role])
+    schema = deepcopy(({5: V05_SCHEMAS, 6: V06_SCHEMAS}.get(payload.get('_pm_version'), SCHEMAS))[role])
     if role == 'planner':
         count = max(1, min(20, int(payload.get('max_tasks', 3))))
         items = schema['properties']['tasks']
@@ -63,7 +63,7 @@ def schema_for(role, payload):
         props['criteria']['items']['maxLength'] = 120
     elif role == 'extractor':
         schema['properties']['claims']['maxItems'] = max(1, min(3, int(payload.get('max_claims', 3))))
-        if payload.get('_pm_version') == 5:
+        if payload.get('_pm_version') in (5, 6):
             ids = [t['id'] for t in payload.get('task_catalog', [])]
             if ids:
                 schema['properties']['claims']['items']['properties']['task_ids']['items']['enum'] = ids
@@ -74,12 +74,12 @@ def schema_for(role, payload):
 
 def request_parts(cfg, role, payload):
     """Render exactly the same text for both the engine and the HTTP boundary."""
-    prompt = BOUNDARY + (V05_PROMPTS if payload.get('_pm_version') == 5 else PROMPTS)[role]
+    prompt = BOUNDARY + ({5: V05_PROMPTS, 6: V06_PROMPTS}.get(payload.get('_pm_version'), PROMPTS))[role]
     if payload.get('compact_retry'):
         prompt += ' Retry: return the smallest valid JSON answer, without long explanations.'
     public = {k: v for k, v in payload.items() if not k.startswith('_pm_')}
     user = json.dumps(public, ensure_ascii=False, separators=(',', ':'))
-    floor = 0.65 if payload.get('_pm_version') == 5 and 'qwen' in cfg.model.casefold() else 1.0
+    floor = 0.65 if payload.get('_pm_version') in (5, 6) and 'qwen' in cfg.model.casefold() else 1.0
     scale = max(floor, min(16.0, float(payload.get('_pm_budget_scale', 1.0))))
     estimated = math.ceil(estimate_tokens(prompt + user, cfg.model) * scale)
     output = min(cfg.output_tokens, OUTPUT_TARGETS[role])
@@ -137,9 +137,9 @@ def update_calibration(previous, base_estimate, actual, successful):
     return d
 
 
-def preflight_research_start(settings, topic, instructions, task_catalog=None):
+def preflight_research_start(settings, topic, instructions, task_catalog=None, *, version=5):
     """Check fixed input before creation and again after the actual plan is known."""
-    common={'topic':topic,'instructions':instructions,'_pm_version':5}
+    common={'topic':topic,'instructions':instructions,'_pm_version':version}
     catalog=task_catalog or []
     largest=max(catalog,key=lambda t:len(json.dumps(t,ensure_ascii=False)),default={'title':'','criteria':[]})
     payloads={
