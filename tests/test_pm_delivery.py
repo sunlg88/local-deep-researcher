@@ -38,7 +38,7 @@ class Delivery(Base):
         try:
             domains = [f'source{i}.example' for i in range(10)]
             with patch.dict(os.environ, fixture.env):
-                results = Web(Settings(allowed_domains=domains)).search('fixture')
+                results = Web(Settings(source_mode='allowlist', allowed_domains=domains)).search('fixture')
             for domain in domains:
                 self.assertIn('site:' + domain, results[0]['content'])
         finally: fixture.doCleanups()
