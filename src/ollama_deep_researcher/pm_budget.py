@@ -10,7 +10,7 @@ import json
 import math
 import re
 
-from .pm_prompts import BOUNDARY, PROMPTS, SCHEMAS, PromptBudgetError
+from .pm_prompts import BOUNDARY, PROMPTS, SCHEMAS, V05_PROMPTS, V05_SCHEMAS, PromptBudgetError
 
 POLICY_VERSION = 1
 RESERVE_TOKENS = 768
@@ -49,7 +49,7 @@ def estimate_tokens(text, model='qwen3.5:9b'):
 
 def schema_for(role, payload):
     """Match the actual task/claim batch, not a global twenty-task schema."""
-    schema = deepcopy(SCHEMAS[role])
+    schema = deepcopy((V05_SCHEMAS if payload.get('_pm_version') == 5 else SCHEMAS)[role])
     if role == 'planner':
         count = max(1, min(20, int(payload.get('max_tasks', 3))))
         items = schema['properties']['tasks']
@@ -63,6 +63,10 @@ def schema_for(role, payload):
         props['criteria']['items']['maxLength'] = 120
     elif role == 'extractor':
         schema['properties']['claims']['maxItems'] = max(1, min(3, int(payload.get('max_claims', 3))))
+        if payload.get('_pm_version') == 5:
+            ids = [t['id'] for t in payload.get('task_catalog', [])]
+            if ids:
+                schema['properties']['claims']['items']['properties']['task_ids']['items']['enum'] = ids
     elif role == 'writer':
         schema['properties']['summary']['maxLength'] = 1800 if payload.get('compact_retry') else 3000
     return schema
@@ -70,12 +74,13 @@ def schema_for(role, payload):
 
 def request_parts(cfg, role, payload):
     """Render exactly the same text for both the engine and the HTTP boundary."""
-    prompt = BOUNDARY + PROMPTS[role]
+    prompt = BOUNDARY + (V05_PROMPTS if payload.get('_pm_version') == 5 else PROMPTS)[role]
     if payload.get('compact_retry'):
         prompt += ' Retry: return the smallest valid JSON answer, without long explanations.'
     public = {k: v for k, v in payload.items() if not k.startswith('_pm_')}
     user = json.dumps(public, ensure_ascii=False, separators=(',', ':'))
-    scale = max(1.0, min(16.0, float(payload.get('_pm_budget_scale', 1.0))))
+    floor = 0.65 if payload.get('_pm_version') == 5 and 'qwen' in cfg.model.casefold() else 1.0
+    scale = max(floor, min(16.0, float(payload.get('_pm_budget_scale', 1.0))))
     estimated = math.ceil(estimate_tokens(prompt + user, cfg.model) * scale)
     output = min(cfg.output_tokens, OUTPUT_TARGETS[role])
     budget = cfg.context_tokens - output - RESERVE_TOKENS
@@ -95,3 +100,60 @@ def ensure_fits(metrics):
             f"budget {metrics['input_budget']} (context={metrics['context_tokens']}, "
             f"output={metrics['output_budget']}, reserve={RESERVE_TOKENS}; "
             f"method={metrics['estimate_method']}, NOT an exact tokenizer count)")
+
+
+def calibration_key(cfg, role, payload):
+    """Avoid applying short English-query measurements to long Korean originals."""
+    text=payload.get('source_text')
+    if not isinstance(text,str):
+        text=json.dumps({k:v for k,v in payload.items() if not k.startswith('_pm_')},ensure_ascii=False)
+    cjk=sum(0x3400<=ord(c)<=0x9FFF or 0xAC00<=ord(c)<=0xD7A3 or 0x3040<=ord(c)<=0x30FF for c in text)
+    unusual=sum(ord(c)>127 for c in text)-cjk
+    script='unusual' if unusual>len(text)*0.1 else 'cjk' if cjk>len(text)*0.25 else 'mixed' if cjk else 'latin'
+    return '|'.join((cfg.model,role,script))
+
+
+def update_calibration(previous, base_estimate, actual, successful):
+    """At least three valid successes; max of last eight ratios; 35% margin.
+
+    Downward steps are at most 10%, floor .65. Upward correction is immediate,
+    including a failed long response. This is heuristic calibration, not a
+    proof that a server/template never truncates an unseen prompt.
+    """
+    d={'scale':1.0,'samples':0,'recent':[],**previous}
+    if type(actual) is not int or actual<=0 or base_estimate<=0:
+        return d
+    ratio=actual/base_estimate
+    if ratio>d['scale']:
+        d.update(scale=min(16.0,max(d['scale'],ratio*1.35)),samples=0,recent=[])
+        return d
+    if not successful:
+        return d
+    d['recent']=(list(d['recent'])+[ratio])[-8:]
+    d['samples']+=1
+    if d['samples']>=3:
+        target=max(0.65,max(d['recent'])*1.35)
+        d['scale']=max(target,d['scale']*0.9) if target<d['scale'] else d['scale']
+    return d
+
+
+def preflight_research_start(settings, topic, instructions, task_catalog=None):
+    """Check fixed input before creation and again after the actual plan is known."""
+    common={'topic':topic,'instructions':instructions,'_pm_version':5}
+    catalog=task_catalog or []
+    largest=max(catalog,key=lambda t:len(json.dumps(t,ensure_ascii=False)),default={'title':'','criteria':[]})
+    payloads={
+        'planner':dict(common,min_tasks=settings.min_tasks,max_tasks=settings.max_tasks),
+        'researcher':dict(common,task=largest['title'],criteria=largest['criteria'],known_domains=settings.allowed_domains),
+        'extractor':dict(common,task_catalog=catalog,source_text='',source_range={'start':0,'end':0},max_claims=3),
+        'critic':dict(common,task=largest['title'],criteria=largest['criteria'],evidence=[]),
+        'writer':dict(common,task=largest['title'],evidence=[],evidence_ids=[]),
+    }
+    result={role:request_parts(settings,role,payload)[2] for role,payload in payloads.items()}
+    for role,m in result.items():
+        if m['estimated_input_tokens']+128>m['input_budget']:
+            raise FixedPromptBudgetError(
+                f'{role}: fixed input estimate {m["estimated_input_tokens"]} tokens, '
+                f'available {m["input_budget"]}. Shorten instructions or explicitly change context/output; '
+                'the original question has NOT been truncated.')
+    return result

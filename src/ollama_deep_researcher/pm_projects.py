@@ -3,7 +3,7 @@
 There is no global evidence index. A reference is a candidate source, not an
 accepted fact. The low-level Store remains usable for old standalone callers.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import json
 import hashlib
 from pathlib import Path
@@ -65,7 +65,8 @@ class Workspace:
 
     def open(self, pid):
         path = self._db_path(pid)
-        store = Store(path.parent, filename='project.sqlite3', project_id=pid)
+        store = Store(path.parent, filename='project.sqlite3', project_id=pid,
+                      read_only=self.load(pid).get('engine_version',4) < 5)
         store.workspace = self
         return store
 
@@ -101,6 +102,10 @@ class Workspace:
         return sorted(result, key=lambda p: p.get('created', ''), reverse=True)
 
     def create(self, topic, settings, instructions='', reference_projects=()):
+        from .pm_types import validate_research_input
+        from .pm_budget import preflight_research_start
+        validate_research_input(topic,instructions)
+        preflight_research_start(settings,topic,instructions)
         if isinstance(reference_projects, (str, bytes)):
             raise ValueError('Reference projects must be a list of project IDs')
         refs = list(dict.fromkeys(reference_projects))
@@ -117,13 +122,29 @@ class Workspace:
             store.create(topic, settings, instructions)
             state = store.load(pid)
             state['reference_projects'] = refs
-            state['schema_version'] = 2
+            state['schema_version'] = 3
+            state['engine_version'] = 5
+            from .pm_research_metrics import initialize
+            initialize(store)
             store.save(state)
             stage.rename(folder)
         except BaseException:
             shutil.rmtree(stage, ignore_errors=True)
             raise
         return pid
+
+    def continue_as_v05(self, legacy_project_id, settings=None):
+        from .pm_types import Settings
+        original = self.load(legacy_project_id)
+        if original.get('engine_version',4) >= 5:
+            raise ValueError('This project is already v0.5; use its resume control')
+        folder = self.project_path(legacy_project_id)
+        # Do not create even a lock file in an untouched legacy directory.
+        lock = worker_lock(folder) if (folder / 'worker.lock').exists() else nullcontext()
+        with lock:
+            cfg = settings or Settings.from_saved(original['settings'])
+            return self.create(original['topic'],cfg,original.get('instructions',''),
+                               reference_projects=[legacy_project_id])
 
     def reference_candidates(self, pid, query, limit=12):
         refs = self.load(pid).get('reference_projects', [])

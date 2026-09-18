@@ -6,6 +6,7 @@ import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from ollama_deep_researcher.pm_types import MAX_INSTRUCTION_BYTES
 
 @unittest.skipUnless(os.name=='nt' or os.environ.get('DISPLAY'), 'Display required')
 class BudgetDesktop(unittest.TestCase):
@@ -21,13 +22,13 @@ class BudgetDesktop(unittest.TestCase):
 
     def test_length_error_is_not_dependency_install_error(self):
         self.app.topic.set('Synthetic topic')
-        self.app.instructions.insert('1.0', '\uac00'*401)
+        self.app.instructions.insert('1.0', '\uac00'*(MAX_INSTRUCTION_BYTES//3+1))
         with patch.dict(sys.modules, {'ollama_deep_researcher.utils':types.ModuleType('utils')}), \
              patch('ollama_deep_researcher.pm_gui.messagebox.showerror') as error:
             self.app.start()
         self.assertEqual(len(error.call_args_list), 1)
         self.assertNotIn('INSTALL_PM_DEPENDENCIES', error.call_args.args[1])
-        self.assertIn('1203', error.call_args.args[1].replace(',',''))
+        self.assertIn(str(3*(MAX_INSTRUCTION_BYTES//3+1)), error.call_args.args[1].replace(',',''))
         self.assertEqual(self.app.store.projects(), [])
 
     def test_input_counter_uses_utf8_bytes(self):

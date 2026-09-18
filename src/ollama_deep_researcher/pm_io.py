@@ -74,6 +74,7 @@ class Web:
     def __init__(self, settings):
         self.settings = settings
         self.check = lambda: None
+        self.source_allowed = lambda url: True
 
     def search(self, query):
         self.check()
@@ -119,7 +120,7 @@ class Web:
         for _ in range(4):
             self.check()
             url = canonical_url(url)
-            if not self.settings.allows(url):
+            if not self.settings.allows(url) or not self.source_allowed(url):
                 raise ValueError('Source blocked by the selected source policy')
             url = public_url(url)
             request = Request(url, headers={'User-Agent': 'LocalResearchPM/0.4 (read-only research)',

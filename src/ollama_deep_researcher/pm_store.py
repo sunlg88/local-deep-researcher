@@ -84,11 +84,16 @@ def worker_lock(root):
 
 
 class Store:
-    def __init__(self, root, filename="research.sqlite3", project_id=None):
+    def __init__(self, root, filename="research.sqlite3", project_id=None, read_only=False):
         self.root = Path(root).resolve()
-        self.root.mkdir(parents=True, exist_ok=True)
+        self.read_only = read_only
         self.path = self.root / filename
         self.project_id = project_id
+        if read_only:
+            if not self.path.is_file():
+                raise KeyError('Legacy database does not exist')
+            return
+        self.root.mkdir(parents=True, exist_ok=True)
         for name in ('documents', 'evidence', 'logs', 'handoff'):
             (self.root / name).mkdir(exist_ok=True)
         with self.db() as c:
@@ -124,7 +129,8 @@ class Store:
 
     @contextmanager
     def db(self):
-        c = sqlite3.connect(self.path, timeout=20)
+        c = (sqlite3.connect(self.path.as_uri() + '?mode=ro', uri=True, timeout=20)
+             if self.read_only else sqlite3.connect(self.path, timeout=20))
         c.row_factory = sqlite3.Row
         c.execute('PRAGMA foreign_keys=ON')
         try:
@@ -403,6 +409,41 @@ class Store:
         with self.db() as c:
             return {name: c.execute(f'SELECT COUNT(*) FROM {name}').fetchone()[0]
                     for name in ('documents', 'evidence')}
+
+    def link_evidence_task(self, eid, task_id):
+        if self.project_id is None:
+            raise ValueError('Evidence/task links require an isolated project')
+        if task_id not in {t['id'] for t in self.load(self.project_id)['tasks']}:
+            raise ValueError('Unknown planned task ID: ' + str(task_id))
+        with self.db() as c:
+            c.execute('INSERT OR IGNORE INTO evidence_tasks VALUES(?,?)', (eid, task_id))
+
+    def evidence_task_ids(self, eid):
+        with self.db() as c:
+            return [r[0] for r in c.execute('SELECT task_id FROM evidence_tasks WHERE evidence_id=? ORDER BY task_id', (eid,))]
+
+    def task_evidence_ids(self, task_id):
+        with self.db() as c:
+            return [r[0] for r in c.execute('SELECT evidence_id FROM evidence_tasks WHERE task_id=? ORDER BY evidence_id', (task_id,))]
+
+    def evidence_task_reviews(self, eid):
+        with self.db() as c:
+            return {r['task_id']: dict(r) for r in c.execute('SELECT * FROM evidence_task_reviews WHERE evidence_id=?', (eid,))}
+
+    def review_evidence_task(self, eid, task_id, status, reason=''):
+        allowed = {'REVIEW_PENDING','REVIEWED_SUPPORT','NEEDS_REVIEW','REVIEW_INCOMPLETE'}
+        if status not in allowed or task_id not in self.evidence_task_ids(eid):
+            raise ValueError('Invalid task-scoped review')
+        with self.db() as c:
+            c.execute('INSERT OR REPLACE INTO evidence_task_reviews VALUES(?,?,?,?,?)',
+                      (eid,task_id,status,str(reason)[:1200],now()))
+        reviews = self.evidence_task_reviews(eid)
+        all_tasks = self.evidence_task_ids(eid)
+        complete = len(reviews) == len(all_tasks)
+        statuses = {r['status'] for r in reviews.values()}
+        summary = ('REVIEWED_SUPPORT' if complete and statuses == {'REVIEWED_SUPPORT'}
+                   else 'NEEDS_REVIEW' if 'NEEDS_REVIEW' in statuses else 'REVIEW_INCOMPLETE')
+        self.review_evidence(eid, summary, 'Task-specific review details are stored separately')
 
     def export(self, pid):
         self._bound(pid)

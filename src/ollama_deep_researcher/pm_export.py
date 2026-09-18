@@ -32,8 +32,16 @@ def export_project(store, pid):
 def _export_project(store, pid):
     state = store.load(pid)
     folder = store.root / 'handoff' if store.project_id else store.root / 'projects' / pid
+    if getattr(store,'read_only',False):
+        workspace_root = store.workspace.root if hasattr(store,'workspace') else store.root.parent.parent
+        folder = workspace_root / 'legacy_exports' / pid
     folder.mkdir(parents=True, exist_ok=True)
     evidence = store.all_evidence()
+    v05 = state.get('engine_version',4) >= 5
+    if v05:
+        for row in evidence:
+            row['task_ids'] = store.evidence_task_ids(row['id'])
+            row['task_reviews'] = store.evidence_task_reviews(row['id'])
     documents = store.all_documents()
     if store.project_id is None and len(store.projects()) > 1:
         # Legacy standalone callers do not get the entire mixed source database.
@@ -59,6 +67,10 @@ def _export_project(store, pid):
     def write_json(relative, data):
         write_text(relative, json.dumps(data, ensure_ascii=False, indent=2))
 
+    productivity, quality_gaps = None, []
+    if v05:
+        from .pm_export_v05 import export_details
+        productivity, quality_gaps = export_details(store,state,write_text,write_json,csv_cell)
     exported_docs, candidates = [], []
     for doc in documents:
         relative = f"documents/{doc['id']}/text.txt"
@@ -117,6 +129,7 @@ def _export_project(store, pid):
     for source in sources:
         if source.get('error'):
             gaps.append(f"- {source['url']}: {source.get('error_type', '')} {source['error']}")
+    gaps += quality_gaps
     write_text('unresolved.md', '\n'.join(gaps))
     lines = ['# Research PM handoff', '', NOTICE, '', '## Original research goal', state['topic'],
              '', '## User instructions (unchanged)', state.get('instructions', ''), '',
@@ -146,12 +159,13 @@ def _export_project(store, pid):
     write_text('handoff.md', '\n'.join(lines))
     write_text('progress.md', '\n'.join(lines))
     # Keep the old filename readable by existing users, now with complete originals.
-    write_json('evidence_pack.json', {'schema_version': 2, 'generated_at': now(),
+    write_json('evidence_pack.json', {'schema_version': 3 if v05 else 2, 'generated_at': now(),
                'project': state, 'evidence': evidence, 'sources': documents, 'notice': NOTICE})
     files = [{'path': relative, 'sha256': hashlib.sha256((folder / relative).read_bytes()).hexdigest(),
               'bytes': (folder / relative).stat().st_size} for relative in sorted(set(written))]
     # Publish the manifest last; its hashes expose incomplete/changed exports.
-    atomic_text(folder / 'manifest.json', json.dumps({'schema_version': 2, 'project_id': pid,
+    atomic_text(folder / 'manifest.json', json.dumps({'schema_version': 3 if v05 else 2, 'engine_version': state.get('engine_version',4),
+                'research_metrics': productivity, 'task_catalog_hash': state.get('task_catalog_hash'), 'project_id': pid,
                 'generated_at': now(), 'documents': exported_docs, 'files': files,
                 'references': state.get('reference_projects', []), 'notice': NOTICE}, ensure_ascii=False, indent=2))
     return folder

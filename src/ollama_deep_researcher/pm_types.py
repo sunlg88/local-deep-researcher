@@ -6,7 +6,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit, quote
 
 
 MAX_TOPIC_BYTES = 1000
-MAX_INSTRUCTION_BYTES = 1200
+MAX_INSTRUCTION_BYTES = 4096
 
 
 def validate_research_input(topic, instructions):

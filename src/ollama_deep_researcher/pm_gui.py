@@ -8,7 +8,10 @@ import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
-from .pm_engine import Engine, TERMINAL
+from .pm_engine import TERMINAL
+from .pm_engine_v05 import EngineV05 as Engine
+from .pm_budget import preflight_research_start
+from . import pm_research_metrics as metrics
 from .pm_io import Ollama, Web
 from .pm_projects import Workspace
 from .pm_types import Settings, MAX_INSTRUCTION_BYTES, validate_research_input
@@ -35,16 +38,18 @@ class App:
         self.messages, self.worker, self.pid = queue.Queue(), None, None
         self.project_ids, self.report_stamp = [], None
         self.reference_ids = []
+        self._view_stores = {}
+        self._metric_cache = {}
         self.reference_label = tk.StringVar(value='참조 프로젝트: 선택 없음 (완전 독립)')
         self.refresh_token = None
-        root.title('Research PM 0.4.1 - \uadfc\uac70 \uc911\uc2ec \uc5f0\uad6c\uc2e4')
+        root.title('Research PM 0.5 - \uadfc\uac70 \uc911\uc2ec \uc5f0\uad6c\uc2e4')
         root.geometry('1200x880'); root.minsize(1050, 760)
         style = ttk.Style(root); style.theme_use('clam')
         style.configure('.', font=('Malgun Gothic', 10))
         style.configure('Treeview', rowheight=32)
         style.configure('Title.TLabel', font=('Malgun Gothic', 20, 'bold'))
         outer = ttk.Frame(root, padding=16); outer.pack(fill='both', expand=True)
-        ttk.Label(outer, text='Research PM 0.4.1  |  원문을 쌓는 리서치 연구실', style='Title.TLabel').pack(anchor='w')
+        ttk.Label(outer, text='Research PM 0.5  |  원문을 쌓는 리서치 연구실', style='Title.TLabel').pack(anchor='w')
         ttk.Label(outer, text='\uacc4\ud68d > \uc870\uc0ac > \ucd94\ucd9c > \ube44\ud310 \uac80\ud1a0 > \uc885\ud569  |  \ub3d9\uc77c \ubaa8\ub378 \uc21c\ucc28 \uc2e4\ud589  |  \ucd5c\uc885 \uc0ac\ub78c \uac80\ud1a0 \ud544\uc218').pack(anchor='w', pady=(5,12))
         cfg = Settings()
         self.url = tk.StringVar(value=cfg.ollama_url)
@@ -111,6 +116,8 @@ class App:
         self.pause_button = ttk.Button(buttons, text='\uc77c\uc2dc\uc815\uc9c0', command=lambda: self.control('PAUSE')); self.pause_button.pack(side='left', padx=5)
         for text, command in [('\uc911\uc9c0', lambda: self.control('STOP')), ('\uc120\ud0dd \uc5f0\uad6c \uc7ac\uac1c', self.resume), ('\uacb0\uacfc \ud3f4\ub354', self.open_results)]:
             ttk.Button(buttons, text=text, command=command).pack(side='left', padx=5)
+        self.continue_button = ttk.Button(buttons,text='0.5 방식으로 이어서 조사',command=self.continue_legacy)
+        self.continue_button.pack(side='left',padx=5)
         self.saved = ttk.Combobox(buttons, state='readonly', width=32); self.saved.pack(side='right')
         self.saved.bind('<<ComboboxSelected>>', self.select_saved)
         self.status = tk.StringVar(value='연구 주제를 입력하고 Ollama 연결을 확인하세요. 일반 웹 조사는 도메인 입력이 필요 없습니다.')
@@ -118,9 +125,10 @@ class App:
         tabs = ttk.Notebook(outer); tabs.pack(fill='both', expand=True)
         task_tab, report_tab, log_tab = [ttk.Frame(tabs) for _ in range(3)]
         for frame, label in [(task_tab,'\uacfc\uc81c \ud604\ud669'), (report_tab,'\uacb0\uacfc / \uadfc\uac70'), (log_tab,'\uc2e4\ud589 \uae30\ub85d')]: tabs.add(frame, text=label)
-        self.table = ttk.Treeview(task_tab, columns=('task','state','attempts','evidence'), show='headings')
-        for key, label, width in [('task','\uc5f0\uad6c \uacfc\uc81c',620),('state','\uc0c1\ud0dc',210),('attempts','\uc2dc\ub3c4',65),('evidence','\uadfc\uac70 \uc218',70)]:
-            self.table.heading(key,text=label); self.table.column(key,width=width,stretch=key in ('task','state'))
+        self.table = ttk.Treeview(task_tab,columns=('task','state','searches','fetched','relevant','evidence','zero_yield'),show='headings')
+        for key,label,width in [('task','조사 과제',390),('state','상태',195),('searches','검색',65),
+                ('fetched','원문',65),('relevant','관련 판정',80),('evidence','근거',65),('zero_yield','연속 무성과',85)]:
+            self.table.heading(key,text=label);self.table.column(key,width=width,stretch=key in ('task','state'))
         self.table.pack(fill='both', expand=True)
         self.report = ScrolledText(report_tab, wrap='word', font=('Malgun Gothic',11)); self.report.pack(fill='both',expand=True)
         self.log = ScrolledText(log_tab, wrap='word', font=('Consolas',10)); self.log.pack(fill='both',expand=True)
@@ -196,6 +204,7 @@ class App:
             cfg = self.settings()
             instructions = self.instructions.get('1.0', 'end-1c').strip()
             validate_research_input(self.topic.get(), instructions)
+            preflight_research_start(cfg,self.topic.get(),instructions)
             from . import utils  # Only import after input validation; never confuse the two errors.
             self.pid = self.store.create(self.topic.get(), cfg, instructions, reference_projects=self.reference_ids)
             self.reload_projects()
@@ -207,6 +216,9 @@ class App:
                 str(exc) + '\n\nINSTALL_PM_DEPENDENCIES.bat: \uc758\uc874\uc131 \uc124\uce58')
 
     def control(self,action):
+        if self.pid and self.store.load(self.pid).get('engine_version',4)<5:
+            messagebox.showinfo('Research PM','기존 연구는 읽기 전용입니다. 0.5 이어서 조사를 사용하세요.')
+            return
         if self.pid:
             self.store.control(self.pid,action)
             self.status.set('\uc694\uccad \uc800\uc7a5\ub428. \ud1b5\uc2e0 / \ucd94\ub860 \ucc98\ub9ac \uacbd\uacc4\uc5d0\uc11c \ubc18\uc601\ub429\ub2c8\ub2e4.')
@@ -215,6 +227,9 @@ class App:
         if self.busy() or not self.pid:
             return
         s = self.store.load(self.pid)
+        if s.get('engine_version',4)<5:
+            messagebox.showinfo('Research PM','기존 연구는 변경하지 않습니다. 0.5 방식으로 이어서 조사 버튼을 사용하세요.')
+            return
         if s['status'] in TERMINAL - {'INPUT_BUDGET_BLOCKED'}:
             messagebox.showinfo('Research PM',
                 '\ud604\uc7ac \ud55c\ub3c4\uc5d0\uc11c \uc885\ub8cc\ub41c \uc5f0\uad6c\uc785\ub2c8\ub2e4. \uc0c8 \uc5f0\uad6c\uc5d0\uc11c \uc774 \ud504\ub85c\uc81d\ud2b8\ub97c \ucc38\uc870\ub85c \uc9c0\uc815\ud574 \uc8fc\uc138\uc694.')
@@ -236,6 +251,17 @@ class App:
         self.store.save(s)
         self.store.control(self.pid, 'RUN')
         self.launch()
+
+    def continue_legacy(self):
+        if self.busy() or not self.pid:
+            return
+        try:
+            self.pid=self.store.continue_as_v05(self.pid)
+            self.reload_projects()
+            self.select_saved()
+            self.launch()
+        except (ValueError,KeyError,RuntimeError) as exc:
+            messagebox.showerror('Research PM',str(exc))
 
     def reload_projects(self):
         projects = self.store.projects(); self.project_ids = [p['id'] for p in projects]
@@ -272,13 +298,37 @@ class App:
             self.start_button.configure(state='disabled' if self.busy() else 'normal')
             if self.pid:
                 s = self.store.load(self.pid)
-                local=self.store.open(self.pid);counts=local.counts()
+                local=self._view_stores.get(self.pid)
+                if local is None:
+                    local=self.store.open(self.pid);self._view_stores[self.pid]=local
+                counts=local.counts()
+                legacy=s.get('engine_version',4)<5
+                self.continue_button.configure(state='normal' if legacy and not self.busy() else 'disabled')
                 pending_review=sum(len(set(t.get('evidence_ids',[]))-set(t.get('reviewed_ids',[]))) for t in s['tasks'])
                 failed=sum(bool(row.get('error')) for row in local.sources())
                 pending = '' if s['control']=='RUN' else ' | '+s['control']+' requested'
                 self.status.set(f"{STATUS.get(s['status'],s['status'])} | {s['stage']} | 원문 {counts['documents']} | 추출 {counts['evidence']} | 검토 대기 {pending_review} | 접근 실패 {failed} | LLM {s['calls']} | Search {s['searches']}"+pending+' | 마지막 수집: '+s.get('last_progress_at','-'))
+                import time
+                stamp=(s['calls'],s['searches'],s['stage'],counts['evidence'],s.get('last_progress_at'))
+                cached=self._metric_cache.get(self.pid)
+                if not legacy and (cached is None or cached[0]!=stamp or time.monotonic()-cached[1]>3):
+                    global_metrics=metrics.project_metrics(local)
+                    per_task={t['id']:metrics.task_metrics(local,t['id']) for t in s['tasks']}
+                    self._metric_cache[self.pid]=(stamp,time.monotonic(),global_metrics,per_task)
+                if legacy:
+                    self.status.set('기존 0.4.x 연구 / 읽기 전용 | 원문 '+str(counts['documents'])+' | 근거 '+str(counts['evidence']))
+                    per_task={}
+                else:
+                    _,_,m,per_task=self._metric_cache[self.pid]
+                    ratio=m['productive_extraction_ratio']
+                    ratio_label='-' if ratio is None else f'{ratio:.1%}'
+                    self.status.set(self.status.get()+f" | 선별 {m['hits_screened']} / 제외 {m['prefilter_rejected']} | 중복 수집 절약 {m['duplicate_fetch_avoided']} | 유효 추출 {ratio_label}")
                 self.table.delete(*self.table.get_children())
-                for t in s['tasks']: self.table.insert('','end',values=(t['title'],STATUS.get(t['status'],t['status']),t['attempts'],len(t['evidence_ids'])))
+                for t in s['tasks']:
+                    tm=per_task.get(t['id'],{})
+                    self.table.insert('','end',values=(t['title'],STATUS.get(t['status'],t['status']),
+                        tm.get('searches',t['attempts']),tm.get('fetched','-'),tm.get('relevant','-'),
+                        len(t['evidence_ids']),tm.get('zero_yield','-')))
                 self.replace(self.log,'\n'.join(f"{e['time']} [{e['kind']}] {e['message']}" for e in self.store.events(self.pid)))
                 path = self.store.project_path(self.pid)/'handoff'/'progress.md'
                 if path.exists():
