@@ -60,7 +60,7 @@ class Engine:
             raise ControlRequested()
 
     def _ask(self, s, role, payload):
-        cfg = Settings(**s['settings'])
+        cfg = Settings.from_saved(s['settings'])
         self.check(s['id'])
         if s['calls'] >= cfg.max_calls:
             raise BudgetExceeded('LLM call budget exhausted')
@@ -107,7 +107,7 @@ class Engine:
             s['status'] = 'PAUSED' if s['control'] == 'PAUSE' else 'STOPPED'
             self.store.save(s)
             return False
-        cfg = Settings(**s['settings'])
+        cfg = Settings.from_saved(s['settings'])
         if hasattr(self.web, 'check'):
             self.web.check = lambda: self.check(pid)
         s['status'] = 'RUNNING'
