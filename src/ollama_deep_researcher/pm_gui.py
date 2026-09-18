@@ -11,7 +11,7 @@ from tkinter.scrolledtext import ScrolledText
 from .pm_engine import Engine, TERMINAL
 from .pm_io import Ollama, Web
 from .pm_projects import Workspace
-from .pm_types import Settings
+from .pm_types import Settings, MAX_INSTRUCTION_BYTES, validate_research_input
 
 SOURCE_MODE_LABELS = {'일반 웹 조사': 'open', '신뢰 도메인 우선': 'preferred', '허용 도메인 전용': 'allowlist'}
 SOURCE_MODE_NAMES = {value: label for label, value in SOURCE_MODE_LABELS.items()}
@@ -25,7 +25,8 @@ STATUS = {'PENDING': '\ub300\uae30', 'RUNNING': '\uc9c4\ud589 \uc911',
 
 STATUS.update({'COLLECTED':'자료 축적 / 후처리 필요', 'NO_FINDINGS':'원문 추가 확인 필요',
     'NO_NEW_WORK':'현재 범위에서 새 작업 없음', 'TIME_LIMIT_REACHED':'실행 시간 한도',
-    'STORAGE_ERROR':'저장 오류 / 안전 정지'})
+    'STORAGE_ERROR':'저장 오류 / 안전 정지',
+    'INPUT_BUDGET_BLOCKED':'\uc785\ub825 \uc608\uc0b0 \ubd80\uc871 / \uc124\uc815 \ud655\uc778'})
 
 class App:
     def __init__(self, root, data_dir=None):
@@ -36,14 +37,14 @@ class App:
         self.reference_ids = []
         self.reference_label = tk.StringVar(value='참조 프로젝트: 선택 없음 (완전 독립)')
         self.refresh_token = None
-        root.title('Research PM - \uadfc\uac70 \uc911\uc2ec \uc5f0\uad6c\uc2e4')
+        root.title('Research PM 0.4.1 - \uadfc\uac70 \uc911\uc2ec \uc5f0\uad6c\uc2e4')
         root.geometry('1200x880'); root.minsize(1050, 760)
         style = ttk.Style(root); style.theme_use('clam')
         style.configure('.', font=('Malgun Gothic', 10))
         style.configure('Treeview', rowheight=32)
         style.configure('Title.TLabel', font=('Malgun Gothic', 20, 'bold'))
         outer = ttk.Frame(root, padding=16); outer.pack(fill='both', expand=True)
-        ttk.Label(outer, text='Research PM  |  원문을 쌓는 리서치 연구실', style='Title.TLabel').pack(anchor='w')
+        ttk.Label(outer, text='Research PM 0.4.1  |  원문을 쌓는 리서치 연구실', style='Title.TLabel').pack(anchor='w')
         ttk.Label(outer, text='\uacc4\ud68d > \uc870\uc0ac > \ucd94\ucd9c > \ube44\ud310 \uac80\ud1a0 > \uc885\ud569  |  \ub3d9\uc77c \ubaa8\ub378 \uc21c\ucc28 \uc2e4\ud589  |  \ucd5c\uc885 \uc0ac\ub78c \uac80\ud1a0 \ud544\uc218').pack(anchor='w', pady=(5,12))
         cfg = Settings()
         self.url = tk.StringVar(value=cfg.ollama_url)
@@ -76,7 +77,7 @@ class App:
         ttk.Button(runtime,text='고급 설정 열기 / 닫기',command=self.toggle_advanced).pack(side='left',padx=12)
         self.advanced=ttk.Frame(box)
         self.advanced.grid(row=4,column=0,columnspan=5,sticky='ew',pady=6)
-        rows = [[('출처 보강 목표','min_sources'), ('과제당 검색 시도','max_attempts'), ('Context','context_tokens'),('Output','output_tokens')],
+        rows = [[('출처 보강 목표','min_sources'), ('과제당 검색 시도','max_attempts'), ('Context','context_tokens'),('Output \uc0c1\ud55c','output_tokens')],
                 [('총 호출','max_calls'), ('총 검색','max_searches'), ('초기 최소 과제','min_tasks'), ('최대 과제','max_tasks')]]
         for index,row in enumerate(rows):
             bar=ttk.Frame(self.advanced);bar.pack(anchor='w',pady=4)
@@ -84,7 +85,7 @@ class App:
                 ttk.Label(bar,text=label).pack(side='left',padx=(0,5))
                 ttk.Entry(bar,textvariable=self.values[key],width=6).pack(side='left',padx=(0,14))
             if index==1:
-                ttk.Checkbutton(bar,text='판단 단계 추론',variable=self.think).pack(side='left')
+                ttk.Checkbutton(bar,text='Critic/Writer \ucd94\ub860 (Planner OFF)',variable=self.think).pack(side='left')
         self.strict_final=tk.BooleanVar(value=cfg.strict_final)
         self.draft_enabled=tk.BooleanVar(value=cfg.draft_enabled)
         flags=ttk.Frame(self.advanced);flags.pack(anchor='w')
@@ -97,6 +98,10 @@ class App:
         ttk.Entry(topic_box, textvariable=self.topic, font=('Malgun Gothic',12)).pack(fill='x', pady=(0,6))
         self.instructions = ScrolledText(topic_box, height=2, font=('Malgun Gothic',10), wrap='word')
         self.instructions.pack(fill='x')
+        self.instruction_count = tk.StringVar()
+        ttk.Label(topic_box, textvariable=self.instruction_count).pack(anchor='w')
+        self.instructions.bind('<<Modified>>', self.update_instruction_count)
+        self.update_instruction_count()
         references=ttk.Frame(topic_box);references.pack(fill='x',pady=(8,0))
         self.reference_button=ttk.Button(references,text='참조 프로젝트 선택',command=self.choose_references)
         self.reference_button.pack(side='left')
@@ -119,7 +124,10 @@ class App:
         self.table.pack(fill='both', expand=True)
         self.report = ScrolledText(report_tab, wrap='word', font=('Malgun Gothic',11)); self.report.pack(fill='both',expand=True)
         self.log = ScrolledText(log_tab, wrap='word', font=('Consolas',10)); self.log.pack(fill='both',expand=True)
-        self.reload_projects(); self.refresh()
+        self.reload_projects()
+        if self.pid:
+            self.select_saved()
+        self.refresh()
         root.protocol('WM_DELETE_WINDOW', self.close)
 
     def settings(self):
@@ -173,15 +181,30 @@ class App:
             except Exception as exc: self.messages.put(('error',str(exc)))
         self.worker = threading.Thread(target=work,daemon=True); self.worker.start()
 
+    def update_instruction_count(self, event=None):
+        text = self.instructions.get('1.0', 'end-1c').strip()
+        count = len(text.encode('utf-8'))
+        self.instruction_count.set(
+            f'\ucd94\uac00 \uc9c0\uc2dc: {count:,} / {MAX_INSTRUCTION_BYTES:,} UTF-8 \ubc14\uc774\ud2b8')
+        if self.instructions.edit_modified():
+            self.instructions.edit_modified(False)
+
     def start(self):
-        if self.busy(): return
+        if self.busy():
+            return
         try:
             cfg = self.settings()
-            from . import utils  # Check search dependencies before consuming model calls.
-            self.pid = self.store.create(self.topic.get(),cfg,self.instructions.get('1.0','end').strip(),reference_projects=self.reference_ids)
-            self.reload_projects(); self.launch()
-        except (ValueError,ImportError) as exc:
-            messagebox.showerror('\uc2dc\uc791 \uc124\uc815 \ud655\uc778',str(exc)+'\n\nINSTALL_PM_DEPENDENCIES.bat: \uc758\uc874\uc131 \uc124\uce58')
+            instructions = self.instructions.get('1.0', 'end-1c').strip()
+            validate_research_input(self.topic.get(), instructions)
+            from . import utils  # Only import after input validation; never confuse the two errors.
+            self.pid = self.store.create(self.topic.get(), cfg, instructions, reference_projects=self.reference_ids)
+            self.reload_projects()
+            self.launch()
+        except ValueError as exc:
+            messagebox.showerror('\uc2dc\uc791 \uc124\uc815 \ud655\uc778', str(exc))
+        except ImportError as exc:
+            messagebox.showerror('\uc758\uc874\uc131 \uc124\uce58 \ud655\uc778',
+                str(exc) + '\n\nINSTALL_PM_DEPENDENCIES.bat: \uc758\uc874\uc131 \uc124\uce58')
 
     def control(self,action):
         if self.pid:
@@ -189,13 +212,30 @@ class App:
             self.status.set('\uc694\uccad \uc800\uc7a5\ub428. \ud1b5\uc2e0 / \ucd94\ub860 \ucc98\ub9ac \uacbd\uacc4\uc5d0\uc11c \ubc18\uc601\ub429\ub2c8\ub2e4.')
 
     def resume(self):
-        if self.busy() or not self.pid: return
-        s=self.store.load(self.pid)
-        if s['status'] in TERMINAL:
-            messagebox.showinfo('Research PM','현재 한도에서 종료된 연구입니다. 새 연구에서 이 프로젝트를 참조로 지정하면 원문을 재활용할 수 있습니다.\n일시정지 / 사용자 중지는 현재 위치에서 재개됩니다.')
+        if self.busy() or not self.pid:
             return
-        s['status'],s['errors']='PENDING',0
-        self.store.save(s);self.store.control(self.pid,'RUN');self.launch()
+        s = self.store.load(self.pid)
+        if s['status'] in TERMINAL - {'INPUT_BUDGET_BLOCKED'}:
+            messagebox.showinfo('Research PM',
+                '\ud604\uc7ac \ud55c\ub3c4\uc5d0\uc11c \uc885\ub8cc\ub41c \uc5f0\uad6c\uc785\ub2c8\ub2e4. \uc0c8 \uc5f0\uad6c\uc5d0\uc11c \uc774 \ud504\ub85c\uc81d\ud2b8\ub97c \ucc38\uc870\ub85c \uc9c0\uc815\ud574 \uc8fc\uc138\uc694.')
+            return
+        try:
+            # Explicit runtime controls only. Do not overwrite topic, source policy,
+            # reference selection, counters or completed document checkpoints.
+            settings = dict(s['settings'])
+            for key in ('context_tokens', 'output_tokens'):
+                settings[key] = int(self.values[key].get())
+            settings['think'] = self.think.get()
+            cfg = Settings.from_saved(settings)
+        except ValueError as exc:
+            messagebox.showerror('\uc7ac\uac1c \uc124\uc815 \ud655\uc778', str(exc))
+            return
+        s['settings'] = cfg.to_dict()
+        s['status'], s['errors'] = 'PENDING', 0
+        s['stop_reason'] = ''
+        self.store.save(s)
+        self.store.control(self.pid, 'RUN')
+        self.launch()
 
     def reload_projects(self):
         projects = self.store.projects(); self.project_ids = [p['id'] for p in projects]

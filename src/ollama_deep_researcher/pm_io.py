@@ -15,7 +15,8 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 from .pm_types import canonical_url, parse_json
 from .pm_documents import FetchedDocument, decode_document
-from .pm_prompts import SCHEMAS, OutputLimitError
+from .pm_prompts import SCHEMAS, OutputLimitError, PromptBudgetError
+from .pm_budget import request_parts, ensure_fits, schema_for
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -198,17 +199,16 @@ class Ollama:
         return [m['name'] for m in data.get('models', [])]
 
     def ask(self, role, payload, check):
-        from .pm_engine import BOUNDARY, PROMPTS
         cfg = self.settings
-        prompt = BOUNDARY + PROMPTS[role]
-        user = json.dumps(payload, ensure_ascii=False)
-        if len((prompt + user).encode('utf-8')) > cfg.context_tokens - cfg.output_tokens - 768:
-            raise ValueError('Prompt byte budget exceeded')
+        self.last_metrics = {}
+        prompt, user, metrics = request_parts(cfg, role, payload)
+        self.last_metrics = dict(metrics, thinking_chars=0, answer_chars=0)
+        ensure_fits(metrics)
         body = {'model': cfg.model, 'messages': [{'role': 'system', 'content': prompt},
                                                 {'role': 'user', 'content': user}],
-                'stream': True, 'format': SCHEMAS[role], 'think': cfg.think and role in ('planner', 'critic', 'writer'),
+                'stream': True, 'format': schema_for(role, payload), 'think': metrics['think'],
                 'keep_alive': '30m', 'options': {'temperature': 0, 'num_ctx': cfg.context_tokens,
-                                               'num_predict': cfg.output_tokens}}
+                                               'num_predict': metrics['output_budget']}}
         request = Request(cfg.ollama_url.rstrip('/') + '/api/chat',
                           data=json.dumps(body).encode('utf-8'), headers={'Content-Type': 'application/json'})
         started, content, total = time.monotonic(), [], 0
@@ -225,11 +225,26 @@ class Ollama:
                 chunk = json.loads(line)
                 if chunk.get('error'):
                     raise RuntimeError(str(chunk['error']))
-                content.append(chunk.get('message', {}).get('content', ''))
+                message = chunk.get('message', {})
+                answer = message.get('content', '')
+                content.append(answer)
+                self.last_metrics['answer_chars'] += len(answer)
+                self.last_metrics['thinking_chars'] += len(message.get('thinking', ''))
                 if chunk.get('done'):
+                    self.last_metrics.update({k: chunk.get(k) for k in (
+                        'done_reason', 'prompt_eval_count', 'eval_count', 'eval_duration',
+                        'prompt_eval_duration', 'load_duration', 'total_duration')})
+                    actual = chunk.get('prompt_eval_count')
+                    if isinstance(actual, int) and actual > cfg.context_tokens - metrics['output_budget'] - 256:
+                        raise PromptBudgetError(
+                            f'Observed prompt {actual} tokens leaves insufficient output headroom; '
+                            'response rejected, original retained for smaller retry')
                     if chunk.get('done_reason') == 'length':
-                        raise OutputLimitError('Generation hit output limit; incomplete response rejected')
-                    self.last_metrics = {k: chunk.get(k) for k in ('prompt_eval_count', 'eval_count', 'eval_duration')}
+                        raise OutputLimitError(
+                            f"Generation hit output limit ({metrics['output_budget']}); incomplete response rejected; "
+                            f"prompt_eval_count={actual}, eval_count={chunk.get('eval_count')}, "
+                            f"thinking_chars={self.last_metrics['thinking_chars']}, "
+                            f"answer_chars={self.last_metrics['answer_chars']}")
                     done = True
                     break
             if not done:

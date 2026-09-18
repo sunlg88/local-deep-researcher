@@ -134,10 +134,8 @@ class Store:
             c.close()
 
     def create(self, topic, settings, instructions=''):
-        if not isinstance(topic, str) or not topic.strip() or len(topic.encode('utf-8')) > 1000:
-            raise ValueError('Research topic must be 1..1000 UTF-8 bytes')
-        if len(instructions.encode('utf-8')) > 1200:
-            raise ValueError('Additional instructions must fit 1200 UTF-8 bytes')
+        from .pm_types import validate_research_input
+        validate_research_input(topic, instructions)
         if self.project_id is not None and self.projects():
             raise ValueError('An isolated database can contain only one project')
         pid = self.project_id or uuid.uuid4().hex[:16]

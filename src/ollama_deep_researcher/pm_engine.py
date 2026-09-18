@@ -8,9 +8,10 @@ from .pm_documents import text_ranges
 from .pm_prompts import BOUNDARY, PROMPTS, OutputLimitError, PromptBudgetError
 from .pm_store import now, worker_lock
 from .pm_types import Settings, canonical_url, gate
+from .pm_budget import (POLICY_VERSION, FixedPromptBudgetError, request_parts, ensure_fits)
 
 TERMINAL = {'NO_NEW_WORK', 'TIME_LIMIT_REACHED', 'BUDGET_EXHAUSTED', 'STORAGE_ERROR',
-            'ERROR', 'PARTIAL', 'COMPLETED_REVIEW_REQUIRED'}
+            'ERROR', 'PARTIAL', 'COMPLETED_REVIEW_REQUIRED', 'INPUT_BUDGET_BLOCKED'}
 EXTRACTOR_VERSION = 'extract-v2'
 
 
@@ -46,28 +47,134 @@ class Engine:
     def _ask(self, s, role, payload):
         cfg = Settings.from_saved(s['settings'])
         payload.update(topic=s['topic'], instructions=s['instructions'])
+        payload['_pm_budget_scale'] = s.get('token_budget_scales', {}).get(role, 1.0)
         self.check(s['id'])
         if s['calls'] >= cfg.max_calls:
             raise BudgetExceeded('LLM call budget exhausted')
-        limit = cfg.context_tokens - cfg.output_tokens - 768
-        def size():
-            return len((BOUNDARY + PROMPTS[role] + json.dumps(payload, ensure_ascii=False)).encode('utf-8'))
-        # Only evidence context may be shortened; originals and task ID lists are untouched.
-        # Source ranges are NEVER silently truncated. The caller splits and checkpoints them.
-        while size() > limit and len(payload.get('evidence', [])) > 1:
+        fixed_payload = dict(payload)
+        for key, value in (('source_text', ''), ('evidence', []), ('evidence_ids', [])):
+            if key in fixed_payload:
+                fixed_payload[key] = value
+        _, _, fixed = request_parts(cfg, role, fixed_payload)
+        if fixed['estimated_input_tokens'] > fixed['input_budget']:
+            raise FixedPromptBudgetError(
+                f"Fixed {role} prompt estimate={fixed['estimated_input_tokens']}, available={fixed['input_budget']}; "
+                'question/task metadata do not fit. No source splitting can fix this; data retained.')
+        # Only the working evidence window may shrink, never the user's instructions.
+        # Writer IDs are derived BEFORE measuring, and never include unseen evidence.
+        while True:
+            if role == 'writer':
+                payload['evidence_ids'] = [e['id'] for e in payload.get('evidence', [])]
+            _, _, metrics = request_parts(cfg, role, payload)
+            if metrics['estimated_input_tokens'] <= metrics['input_budget']:
+                break
+            if len(payload.get('evidence', [])) <= 1:
+                ensure_fits(metrics)
             payload['evidence'].pop()
-        if size() > limit:
-            raise PromptBudgetError('Prompt exceeds input budget; split source/review or increase context')
-        if role == 'writer':
-            payload['evidence_ids'] = [e['id'] for e in payload.get('evidence', [])]
         s['calls'] += 1
         self.store.save(s)
-        self.store.log(s['id'], role, f"call {s['calls']}; original goal preserved")
-        result = self.model.ask(role, payload, lambda: self.check(s['id']))
-        self.check(s['id'])
-        if not isinstance(result, dict):
-            raise ValueError('Role must return a JSON object')
-        return result
+        self.store.log(s['id'], role, json.dumps(dict(metrics, call=s['calls'], status='started')))
+        if hasattr(self.model, 'last_metrics'):
+            self.model.last_metrics = {}
+        status = 'MODEL_FAILED'
+        try:
+            result = self.model.ask(role, payload, lambda: self.check(s['id']))
+            self.check(s['id'])
+            if not isinstance(result, dict):
+                raise ValueError('Role must return a JSON object')
+            status = 'MODEL_COMPLETED'
+            return result
+        finally:
+            observed = getattr(self.model, 'last_metrics', {})
+            actual = observed.get('prompt_eval_count')
+            if isinstance(actual, int) and actual > metrics['estimated_input_tokens']:
+                old = payload['_pm_budget_scale']
+                new = min(16.0, max(old, old * actual / metrics['estimated_input_tokens'] * 1.2))
+                s.setdefault('token_budget_scales', {})[role] = new
+                self.store.log(s['id'], 'BUDGET_CALIBRATED', json.dumps(
+                    {'role': role, 'old_scale': old, 'new_scale': new, 'observed_input_tokens': actual}))
+            self.store.log(s['id'], status, json.dumps(dict(metrics, **{
+                k: v for k, v in observed.items() if k not in metrics},
+                call=s['calls'], role=role)))
+            self.store.save(s)
+
+    def upgrade_budget_checkpoint(self, s):
+        """Retry old pre-transport budget failures, keeping DONE work and evidence."""
+        if s.get('budget_policy_version') == POLICY_VERSION:
+            return
+        restored = 0
+        tasks = {t['id']: t for t in s['tasks']}
+        for row in self.store.processing():
+            task = tasks.get(row.get('task_id'))
+            interrupted = (row.get('status') == 'RETRY' and
+                           row.get('budget_policy_version') == POLICY_VERSION)
+            if not task or (row.get('status') != 'FAILED' and not interrupted):
+                continue
+            error = row.get('error') or row.get('previous_error', '')
+            if not any(word in error for word in ('PromptBudgetError', 'Prompt byte budget')):
+                continue
+            did, start, end = row.get('document_id'), row.get('start'), row.get('end')
+            if not isinstance(start, int) or not isinstance(end, int) or start >= end:
+                continue
+            self.normalize_task(task)
+            key = self.store.work_key(did, self.question(s, task), start, end, EXTRACTOR_VERSION)
+            existing = self.store.work(key)
+            if existing and existing['status'] in ('DONE', 'SPLIT'):
+                continue
+            if key not in {item['key'] for item in task['chunks']}:
+                task['chunks'].append(dict(did=did, start=start, end=end, key=key, attempts=0))
+            self.store.record_work(key, 'RETRY', task_id=task['id'], document_id=did,
+                start=start, end=end, extractor_version=EXTRACTOR_VERSION,
+                previous_error=error, budget_policy_version=POLICY_VERSION, attempts=0)
+            restored += 1
+        s['budget_policy_version'] = POLICY_VERSION
+        if restored and s['stage'] in ('writer', 'finished'):
+            s.update(stage='select', status='PENDING')
+        self.store.log(s['id'], 'BUDGET_POLICY', json.dumps(
+            {'version': POLICY_VERSION, 'restored_ranges': restored, 'completed_work_preserved': True}))
+
+    def fit_source(self, s, task, item, payload, cfg):
+        """Preflight a source range, checkpointing EVERY unread character before call."""
+        def measure(end):
+            data = dict(payload, topic=s['topic'], instructions=s['instructions'],
+                source_text=payload['source_text'][:end-item['start']],
+                source_range={'start': item['start'], 'end': end},
+                _pm_budget_scale=s.get('token_budget_scales', {}).get('extractor', 1.0))
+            return request_parts(cfg, 'extractor', data)[2]
+        metrics = measure(item['end'])
+        if metrics['estimated_input_tokens'] <= metrics['input_budget']:
+            return False
+        fixed = measure(item['start'])
+        if fixed['estimated_input_tokens'] + 128 > fixed['input_budget']:
+            raise FixedPromptBudgetError(
+                f"Fixed prompt estimate={fixed['estimated_input_tokens']}, available={fixed['input_budget']}; "
+                'question/metadata leave no safe source space. Change input/context settings; sources preserved.')
+        lo, hi = item['start'], item['end']
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            m = measure(mid)
+            if m['estimated_input_tokens'] <= m['input_budget']:
+                lo = mid
+            else:
+                hi = mid - 1
+        if lo - item['start'] < min(64, item['end']-item['start']):
+            raise FixedPromptBudgetError('Fixed prompt leaves less than 64 source characters; source retained')
+        # Preserve a little boundary context. Both children are strictly shorter.
+        overlap = min(80, (lo-item['start'])//4)
+        children = []
+        for a, b in ((item['start'], lo), (lo-overlap, item['end'])):
+            key = self.store.work_key(item['did'], self.question(s, task), a, b, EXTRACTOR_VERSION)
+            children.append(dict(did=item['did'], start=a, end=b, key=key, attempts=item['attempts']))
+        self.store.record_work(item['key'], 'SPLIT', task_id=task['id'], document_id=item['did'],
+            start=item['start'], end=item['end'], extractor_version=EXTRACTOR_VERSION,
+            reason='BUDGET_PREFLIGHT', children=children, attempts=item['attempts'])
+        task['chunks'][:1] = children
+        self.store.log(s['id'], 'CHUNK_RESIZED', json.dumps(
+            {'task': task['id'], 'document': item['did'], 'start': item['start'], 'end': item['end'],
+             'split_at': lo, 'estimated_input_tokens': metrics['estimated_input_tokens'],
+             'input_budget': metrics['input_budget'], 'model_called': False}))
+        s['stage'] = 'select'
+        return True
 
     @staticmethod
     def make_task(item, number):
@@ -291,7 +398,10 @@ class Engine:
         payload = {'task': task['title'], 'criteria': task['criteria'], 'source_url': doc['url'],
                    'source_text': doc['body'][item['start']:item['end']],
                    'source_range': {'start': item['start'], 'end': item['end']},
-                   'max_claims': 3, 'retry': item['attempts']}
+                   'max_claims': 1 if item['attempts'] else 3, 'retry': item['attempts'],
+                   'compact_retry': bool(item['attempts'])}
+        if self.fit_source(s, task, item, payload, cfg):
+            return
         self.store.record_work(item['key'], 'IN_PROGRESS', task_id=task['id'], document_id=doc['id'],
             start=item['start'], end=item['end'], extractor_version=EXTRACTOR_VERSION,
             question=self.question(s, task), attempts=item['attempts'])
@@ -319,6 +429,9 @@ class Engine:
             question=self.question(s, task), relevance=relevance, evidence_ids=accepted,
             attempts=item['attempts']+1)
         task['chunks'].pop(0)
+        self.store.log(s['id'], 'EXTRACTION_COMPLETED', json.dumps({
+            'task': task['id'], 'document': doc['id'], 'start': item['start'], 'end': item['end'],
+            'relevance': relevance, 'returned_claims': len(claims), 'accepted_claims': len(accepted)}))
         if accepted:
             s['last_progress_at'] = now()
         s['stage'] = 'select'
@@ -331,7 +444,9 @@ class Engine:
             s['stage'] = 'select'
             return
         batch = task['review_queue'][0]
+        retry = task['review_retry'].get('|'.join(batch), 0)
         payload = {'task': task['title'], 'criteria': task['criteria'],
+                   'compact_retry': bool(retry),
                    'evidence': self.compact(self.store.get_evidence(batch))}
         result = self._ask(s, 'critic', payload)
         shown = {e['id'] for e in payload['evidence']}
@@ -386,7 +501,8 @@ class Engine:
                 continue
             s['writing_task'] = task['id']
             payload = {'task': task['title'], 'source_status': task['source_status'],
-                       'evidence_ids': ids, 'evidence': self.compact(self.store.get_evidence(ids[-6:]))}
+                       'compact_retry': bool(task.get('draft_retry')),
+                       'evidence_ids': ids[-6:], 'evidence': self.compact(self.store.get_evidence(ids[-6:]))}
             result = self._ask(s, 'writer', payload)
             cited, text = result.get('evidence_ids'), result.get('summary')
             if not isinstance(text,str) or not text.strip() or not isinstance(cited,list) or not cited or not all(
@@ -410,6 +526,9 @@ class Engine:
         s['errors'] = s.get('errors',0)+1
         task = s['tasks'][s['active']] if s.get('active') is not None else None
         self.store.log(s['id'], 'WORK_ERROR', json.dumps({'stage':stage,'task': task and task['id'], 'error':message}))
+        if isinstance(exc, FixedPromptBudgetError):
+            s.update(status='INPUT_BUDGET_BLOCKED', stop_reason=message)
+            return
         if stage == 'select':
             s['selection_errors'] = s.get('selection_errors',0)+1
             if s['selection_errors'] >= 2:
@@ -433,7 +552,7 @@ class Engine:
                 children=[]
                 for start,end in ((item['start'],mid),(max(item['start'],mid-80),item['end'])):
                     key=self.store.work_key(item['did'],self.question(s,task),start,end,EXTRACTOR_VERSION)
-                    children.append(dict(did=item['did'],start=start,end=end,key=key,attempts=0))
+                    children.append(dict(did=item['did'],start=start,end=end,key=key,attempts=item['attempts']))
                 task['chunks'][:0]=children
                 status='SPLIT'
             elif item['attempts']<2 and not isinstance(exc,PromptBudgetError):
@@ -461,7 +580,9 @@ class Engine:
         elif stage == 'writer':
             writing=next((t for t in s['tasks'] if t['id']==s.get('writing_task')),None)
             if writing:
-                writing['draft_error']=message
+                writing['draft_retry'] = writing.get('draft_retry', 0) + 1
+                if writing['draft_retry'] >= 2:
+                    writing['draft_error'] = message
             else:
                 s.update(status='NO_NEW_WORK',stage='finished',stop_reason='Draft unavailable; sources retained')
             return
@@ -492,10 +613,15 @@ class Engine:
             self.check(pid)
             for task in s['tasks']:
                 self.normalize_task(task)
+            self.upgrade_budget_checkpoint(s)
+            stage = s['stage']
             if stage=='plan':
-                result=self._ask(s,'planner',{'min_tasks':cfg.min_tasks,'max_tasks':cfg.max_tasks})
+                retry = s.get('planner_errors', 0)
+                maximum = cfg.min_tasks if retry else max(cfg.min_tasks, min(cfg.max_tasks, 3))
+                result=self._ask(s,'planner',{'min_tasks':cfg.min_tasks,'max_tasks':maximum,
+                    'compact_retry':bool(retry)})
                 tasks=result.get('tasks')
-                if not isinstance(tasks,list) or not cfg.min_tasks<=len(tasks)<=cfg.max_tasks:
+                if not isinstance(tasks,list) or not cfg.min_tasks<=len(tasks)<=maximum:
                     raise ValueError('Planner task count invalid')
                 created=[self.make_task(t,i) for i,t in enumerate(tasks,1)]
                 if len({t['title'].casefold() for t in created})!=len(created):

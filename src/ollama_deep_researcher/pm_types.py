@@ -5,6 +5,25 @@ import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit, quote
 
 
+MAX_TOPIC_BYTES = 1000
+MAX_INSTRUCTION_BYTES = 1200
+
+
+def validate_research_input(topic, instructions):
+    """Storage/GUI size guard, separate from the model's token budget."""
+    if not isinstance(topic, str) or not topic.strip():
+        raise ValueError('\uc5f0\uad6c \uc8fc\uc81c\ub97c \uc785\ub825\ud558\uc138\uc694.')
+    count = len(topic.encode('utf-8'))
+    if count > MAX_TOPIC_BYTES:
+        raise ValueError(f'\uc5f0\uad6c \uc8fc\uc81c: {count:,} / {MAX_TOPIC_BYTES:,} UTF-8 \ubc14\uc774\ud2b8. \uc8fc\uc81c\ub97c \uc904\uc5ec\uc8fc\uc138\uc694.')
+    if not isinstance(instructions, str):
+        raise ValueError('\ucd94\uac00 \uc9c0\uc2dc\ub294 \ubb38\uc790\uc5f4\uc774\uc5b4\uc57c \ud569\ub2c8\ub2e4.')
+    count = len(instructions.encode('utf-8'))
+    if count > MAX_INSTRUCTION_BYTES:
+        raise ValueError(f'\ucd94\uac00 \uc9c0\uc2dc: {count:,} / {MAX_INSTRUCTION_BYTES:,} UTF-8 \ubc14\uc774\ud2b8. \uc785\ub825\ubb38\uc744 \uc904\uc5ec\uc8fc\uc138\uc694.\n'
+                         '\ud55c\uae00 \uc74c\uc808\uc740 \ub300\uccb4\ub85c 3\ubc14\uc774\ud2b8\uc785\ub2c8\ub2e4. \uc774 \uc81c\ud55c\uc740 \ubaa8\ub378 \ucee8\ud14d\uc2a4\ud2b8 \ud1a0\ud070 \uc218\uc640 \ubcc4\uac1c\uc785\ub2c8\ub2e4.')
+
+
 @dataclass
 class Settings:
     model: str = 'qwen3.5:9b'
