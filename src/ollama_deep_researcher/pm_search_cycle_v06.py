@@ -1,5 +1,6 @@
 """Focused queries, durable query batches, bounded fetches and ranked originals."""
 import json
+import hashlib
 import sqlite3
 import time
 from urllib.parse import urlsplit
@@ -7,9 +8,10 @@ from urllib.parse import urlsplit
 from .pm_engine import BudgetExceeded, ControlRequested, TimeLimitExceeded
 from .pm_budget import FixedPromptBudgetError
 from .pm_prompts import OutputLimitError, PromptBudgetError
-from .pm_query_policy import validate_intent, query_variants
+from .pm_query_policy import validate_intent, query_variants, intent_anchors
 from .pm_search_quality import normalize_hit, parse_search_intent, score_hit, diversify_hits, HitDecision, near_duplicate_query, site_allows
 from .pm_fetch_quality import search_excerpt_key
+from .pm_focus_v061 import score_focused_hit
 from .pm_store import now
 from .pm_types import canonical_url
 from . import pm_research_metrics as metrics
@@ -21,11 +23,39 @@ FETCH_LIMITS={'efficient':1,'balanced':3,'quality':3}
 
 
 class SearchCycleV06:
+    def _known_domains(self,cfg):
+        return list(dict.fromkeys(cfg.allowed_domains+[(urlsplit(x['url']).hostname or '')
+                   for x in self.store.sources() if x.get('document_id')]))[:20]
+
+    def _query_context(self,s,task,cfg):
+        # Do not reuse a plan across changed goals, permissions, or new evidence.
+        data=[s['id'],s['topic'],s['instructions'],task['title'],task['criteria'],
+              cfg.model,cfg.search_api,cfg.source_mode,cfg.allowed_domains,sorted(task['evidence_ids'])]
+        return hashlib.sha256(json.dumps(data,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+
+    def _unseen_variants(self,intent,task,cfg):
+        variants=query_variants(intent,'quality',0)
+        entries=[{'query':q,'intent':intent.to_dict(),'variant':i} for i,q in enumerate(variants)
+                 if not any(near_duplicate_query(q,old) for old in task['queries'])]
+        return entries if cfg.optimization_mode=='quality' else entries[:1]
+
     def _plan_queries(self,s,task,cfg):
         task['attempts']+=1
         self.store.save(s)
-        known=list(dict.fromkeys(cfg.allowed_domains+[(urlsplit(x['url']).hostname or '')
-                   for x in self.store.sources() if x.get('document_id')]))[:20]
+        known=self._known_domains(cfg)
+        context=self._query_context(s,task,cfg)
+        if task.get('intent_context_v061')==context and task.get('last_intent'):
+            try:
+                cached=validate_intent(json.loads(task['last_intent']),set(known))
+                available=self._unseen_variants(cached,task,cfg)
+            except (TypeError,ValueError):
+                available=[]
+            if available:
+                task['query_queue_v06']=available
+                self.store.log(s['id'],'QUERY_VARIANT_REUSED',json.dumps({'task':task['id'],
+                    'query':available[0]['query'],'model_called':False,'policy':'v061'}))
+                self.store.save(s)
+                return
         payload={'task':task['title'],'criteria':task['criteria'],'known_domains':known,
                  'previous_queries':task['queries'][-6:],'feedback':task['feedback'][-3:],
                  'attempt_feedback':self._task_feedback(task['id']),
@@ -46,18 +76,29 @@ class SearchCycleV06:
         if task.get('last_intent') and task['last_intent']!=signature:
             task['strategy_changes']=task.get('strategy_changes',0)+1
         task['last_intent']=signature
-        streak=task.get('zero_yield_streak',0)
-        task['query_queue_v06']=[{'query':q,'intent':intent.to_dict(),'variant':i}
-                                for i,q in enumerate(query_variants(intent,cfg.optimization_mode,streak))]
+        task['intent_context_v061']=context
+        task['query_queue_v06']=self._unseen_variants(intent,task,cfg)
+        if not task['query_queue_v06']:
+            task['duplicate_intent_streak']=task.get('duplicate_intent_streak',0)+1
+            task['feedback']=['All variants of that intent were tried; choose a different information gap or entity.']
+            if task['duplicate_intent_streak']>=2:
+                task['attempts']=max(task['attempts'],cfg.max_attempts)
+                task['v06_stop']='STALLED'
+            self.store.log(s['id'],'INTENT_EXHAUSTED',json.dumps({'task':task['id'],
+                'duplicate_streak':task['duplicate_intent_streak'],'search_called':False}))
+        else:
+            task['duplicate_intent_streak']=0
         self.store.save(s)
 
     def research(self,s,task,cfg):
         aid=task.get('active_search_id')
         if not aid:
             if not task.get('query_queue_v06'): self._plan_queries(s,task,cfg)
+            if not task.get('query_queue_v06'):
+                s['stage']='select';return
             entry=task['query_queue_v06'].pop(0)
             data=entry['intent']
-            anchors=list(dict.fromkeys([data['entity'],data['gap']]+data['keywords']))[:6]
+            anchors=intent_anchors(validate_intent(data,set(self._known_domains(cfg))))
             query=entry['query']
             aid=metrics.begin_search_attempt(self.store,s['id'],task['id'],query,data['strategy'],anchors,
                                              executed_query=cfg.search_query(query))
@@ -73,7 +114,34 @@ class SearchCycleV06:
             task['active_search_id']=aid
             self.store.save(s)
         attempt=metrics.attempt(self.store,aid)
+        if any(not isinstance(x, str) or not x.strip() or len(x.strip()) > 100 for x in attempt['anchors']):
+            repaired=[]
+            for text in attempt['anchors']:
+                if isinstance(text,str):
+                    repaired.extend(text[i:i+100].strip() for i in range(0,len(text),100) if text[i:i+100].strip())
+            if not repaired:
+                metrics.finish_search_attempt(self.store,aid,status='INVALID_INTENT',error='No usable anchors')
+                task.pop('active_search_id',None)
+                s['stage']='select'
+                return
+            attempt['anchors']=list(dict.fromkeys(repaired))[:6]
+            with self.store.db() as c:
+                c.execute('UPDATE search_attempts SET anchors=? WHERE id=?',(json.dumps(attempt['anchors']),aid))
+            self.store.log(s['id'],'ANCHORS_REPAIRED',json.dumps({'attempt':aid,'original_query_preserved':True}))
         intent=parse_search_intent(attempt['query'],attempt['strategy'],attempt['anchors'])
+        with self.store.db() as c:
+            focus_row=c.execute('SELECT data FROM search_intents_v06 WHERE attempt_id=?',(aid,)).fetchone()
+        attempt_focus=json.loads(focus_row[0])['intent'] if focus_row else {}
+        try:
+            validate_intent(attempt_focus,set(self._known_domains(cfg)))
+        except ValueError as exc:
+            metrics.finish_search_attempt(self.store,aid,status='INVALID_INTENT',error=str(exc))
+            task.pop('active_search_id',None)
+            task['query_queue_v06']=[]
+            task['feedback']=['Stored intent incompatible with compact query policy: '+str(exc)]
+            self.store.log(s['id'],'INTENT_RETIRED',json.dumps({'attempt':aid,'reason':str(exc),
+                'originals_and_completed_work_preserved':True}))
+            s['stage']='select';return
         if attempt['status'] in ('PLANNED','SEARCHING'):
             if s['searches']>=cfg.max_searches: raise BudgetExceeded('Search request budget exhausted')
             wait=self.pacer.wait('search:'+cfg.search_api,lambda:self.check(s['id']))
@@ -86,7 +154,7 @@ class SearchCycleV06:
                 hits=self.web.search(attempt['query'])
                 if not isinstance(hits,list): raise ValueError('Search adapter must return a list')
                 rows=[normalize_hit(h) for h in hits[:cfg.source_limit*3]]
-                metrics.save_search_results(self.store,aid,[(i,h,score_hit(intent,h,cfg)) for i,h in enumerate(rows)])
+                metrics.save_search_results(self.store,aid,[(i,h,score_focused_hit(intent,h,cfg,attempt_focus)) for i,h in enumerate(rows)])
                 self.pacer.record('search:'+cfg.search_api,wait,success=True,status_code=200)
                 with self.store.db() as c:
                     for i,h in enumerate(rows):
@@ -104,6 +172,9 @@ class SearchCycleV06:
         candidates=[]
         for hit in metrics.hits(self.store,aid):
             if hit['status'] not in ('CANDIDATE','FETCHING'): continue
+            if 'ENTITY_TOPIC_DEFERRED' in hit['reasons']:
+                metrics.update_hit(self.store,aid,hit['rank'],'FOCUS_DEFERRED',reason='ENTITY_TOPIC_DEFERRED')
+                continue
             url=canonical_url(hit['url']); old=self.store.source(url)
             if old and old.get('document_id'):
                 did=old['document_id']

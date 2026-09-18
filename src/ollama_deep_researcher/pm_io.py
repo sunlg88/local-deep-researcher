@@ -219,6 +219,7 @@ class Ollama:
                           data=json.dumps(body).encode('utf-8'), headers={'Content-Type': 'application/json'})
         started, content, total = time.monotonic(), [], 0
         check()
+        self.last_metrics['response_stage']='transport_open'
         with opener().open(request, timeout=min(cfg.request_timeout, 60)) as response:
             done = False
             for line in response:
@@ -228,7 +229,9 @@ class Ollama:
                 total += len(line)
                 if total > 2_000_000:
                     raise ValueError('Ollama response exceeds transport budget')
+                self.last_metrics['response_stage']='stream_decode'
                 chunk = json.loads(line)
+                self.last_metrics['response_stage']='inference_response'
                 if chunk.get('error'):
                     raise RuntimeError(str(chunk['error']))
                 message = chunk.get('message', {})
@@ -254,5 +257,9 @@ class Ollama:
                     done = True
                     break
             if not done:
+                self.last_metrics['response_stage']='stream_completion'
                 raise ValueError('Ollama stream ended without completion')
-        return parse_json(''.join(content))
+        self.last_metrics['response_stage']='response_json'
+        result=parse_json(''.join(content))
+        self.last_metrics['response_stage']='complete'
+        return result

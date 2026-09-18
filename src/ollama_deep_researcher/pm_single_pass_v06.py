@@ -5,7 +5,8 @@ import json
 from .pm_single_pass import SinglePass
 from .pm_chunking_v06 import build_chunks, expand_with_neighbors
 from .pm_retrieval_v06 import rank_chunks, select_progressive, BUDGETS, terms, rerank_semantic
-from .pm_fetch_quality import reuse_key, assess_fetched_page
+from .pm_fetch_quality import reuse_key, assess_fetched_page, PageQuality
+from .pm_focus_v061 import focused_signal
 from .pm_types import Settings
 from . import pm_v06_store as audit
 from . import pm_research_metrics as metrics
@@ -46,6 +47,9 @@ class SinglePassV06(SinglePass):
         self._restore_plan(s,plan)
 
     def _restore_plan(self,s,plan):
+        if plan['status'] != 'QUEUED':
+            s['document_queue']=[x for x in s.get('document_queue',[]) if x['did']!=plan['document_id']]
+            return
         queued={x['key'] for x in s.setdefault('document_queue',[])}
         def leaves(item):
             work=self.store.work(item['key'])
@@ -78,6 +82,12 @@ class SinglePassV06(SinglePass):
             search_title=doc['metadata'].get('search_title',doc['title']),
             search_snippet=doc['metadata'].get('search_snippet',''),
             fetched_title=doc['metadata'].get('fetched_title',''),body=doc['body'])
+        if doc_intent.get('entity') and quality.status != 'ERROR_PAGE_DEFERRED':
+            # Actual fetched title is source context; a search title is only a lead.
+            signal=focused_signal(doc_intent,doc['metadata'].get('fetched_title','')+' '+doc['body'])
+            numeric_context=(signal.entity_present and 'SOURCE_TITLE_NUMERIC_CONTEXT' in quality.reasons)
+            if not signal.plausible and not numeric_context:
+                quality=PageQuality('LOW_SIGNAL_DEFERRED',0,('FOCUSED_ENTITY_TOPIC_MISSING','NOT_PROOF_OF_IRRELEVANCE'))
         key=reuse_key(doc['body'],doc['title'])
         alias=audit.alias_candidate(self.store,key,did)
         plan={'document_id':did,'reuse_key':key,'alias_of':alias,'query':query,'task_terms':task_terms,
@@ -112,6 +122,52 @@ class SinglePassV06(SinglePass):
             audit.record_decision(self.store,'DOCUMENT_DEFERRED',did,quality=asdict(quality),
                                   notice='Ranking is not proof of irrelevance; original remains available.')
             self.store.log(s['id'],'DOCUMENT_DEFERRED',json.dumps({'document':did,'reason':quality.status,'original_retained':True}))
+
+    def _defer_after_negative(self,s,did):
+        plan=audit.get_plan(self.store,did)
+        if not plan or plan['status']!='QUEUED': return
+        with self.store.db() as c:
+            rows=c.execute('SELECT relevance,accepted_count FROM extraction_outcomes WHERE document_id=?',(did,)).fetchall()
+        if not rows or any(r[1]>0 or r[0] in ('relevant','uncertain') for r in rows): return
+        if not any(r[0]=='irrelevant' for r in rows): return
+        doc=self.store.document(did)
+        focus=doc['metadata'].get('research_intent',{})
+        focuses=[focus] if focus.get('entity') else []
+        if not focuses:
+            for t in s['tasks']:
+                try:
+                    item=json.loads(t.get('last_intent','{}'))
+                    if isinstance(item,dict) and item.get('entity'): focuses.append(item)
+                except (TypeError,ValueError): pass
+        if not focuses: return  # Missing context is not a licence to discard a source.
+        text=doc['metadata'].get('fetched_title','')+' '+doc['body']
+        if any(focused_signal(f,text).plausible for f in focuses): return
+        # Check the entire original, not just its first paragraph. A relevant tail,
+        # uncertain result or prior evidence prevents this conservative early exit.
+        spans=[(r['start'],r['end']) for r in self.store.processing()
+               if r.get('document_id')==did and r['status']=='DONE']
+        plan['unread_chars']=max(0,len(doc['body'])-sum(b-a for a,b in _union(spans)))
+        plan.update(status='DEFERRED',defer_reason='NEGATIVE_EXTRACTION_NO_DOCUMENT_SIGNAL')
+        audit.save_plan(self.store,plan)  # durable decision before queue removal
+        skipped=sum(x['did']==did for x in s.get('document_queue',[]))
+        s['document_queue']=[x for x in s.get('document_queue',[]) if x['did']!=did]
+        metrics.finish_document(self.store,did)
+        audit.record_decision(self.store,'NEGATIVE_READING_DEFERRED',did,
+                              pending_ranges=skipped,unread_chars=plan['unread_chars'],original_retained=True)
+        self.store.log(s['id'],'READING_DEFERRED',json.dumps({'document':did,
+            'reason':plan['defer_reason'],'pending_ranges':skipped,'original_retained':True}))
+
+    def extract(self,s,task,cfg):
+        if not s.get('document_queue'):
+            s['stage']='select';return
+        item=dict(s['document_queue'][0])
+        plan=audit.get_plan(self.store,item['did'])
+        if plan and plan['status']=='DEFERRED':
+            self._restore_plan(s,plan);s['stage']='select';return
+        super().extract(s,task,cfg)
+        outcome=self.store.work(item['key'])
+        if outcome and outcome['status']=='DONE' and outcome.get('relevance')=='irrelevant':
+            self._defer_after_negative(s,item['did'])
 
     def _intake_references(self,s):
         if s.get('references_v06_scanned'): return
@@ -166,7 +222,10 @@ class SinglePassV06(SinglePass):
         self.upgrade_budget_checkpoint(s)
         self._sync_evidence(s)
         for plan in audit.plans(self.store):
-            if plan['status']=='QUEUED': self._restore_plan(s,plan)
+            if plan['status']=='QUEUED':
+                self._defer_after_negative(s,plan['document_id'])
+                self._restore_plan(s,audit.get_plan(self.store,plan['document_id']))
+            elif plan['status']=='DEFERRED': self._restore_plan(s,plan)
         self._advance_plans(s,cfg)
         self._apply_task_stops(s,cfg)
         super().select(s,cfg)

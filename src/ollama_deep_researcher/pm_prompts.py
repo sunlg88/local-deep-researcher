@@ -120,7 +120,11 @@ V06_PROMPTS['researcher'] = (
     'Return ONLY entity, gap, keywords, strategy, language, site_hint. '
     'Do not return a query string, search operators, Boolean OR/AND chains or followup tasks. '
     'Use the user-provided entity name; do not expand ambiguous abbreviations into guessed companies. '
-    'entity <=120 characters, gap <=200; keywords is 1-4 short phrases. '
+    'entity <=120 characters. gap is ONE search phrase, <=80 characters and <=10 words, not a sentence or checklist. '
+    'Never copy task criteria or instructions into gap. Pick ONE item now; keep other items for later searches. '
+    'No commas/semicolons or instructions such as confirm, verify, need to, or preserve data. '
+    'keywords is 1-4 short phrases directly supporting that SAME gap; prefer 1-2. '
+    'Use search-language words: for language=en gap must be English, not a Korean task explanation. '
     'Keep numbers, years, exclusions and scientific conditions in the gap/keywords. '
     'strategy: broad, exact_entity, official_site, pdf or gap. '
     'language: en, ko, ja, zh, de, fr, es, pt, ru, it, ar or auto. '
@@ -131,7 +135,7 @@ V06_PROMPTS['researcher'] = (
 V06_SCHEMAS = dict(V05_SCHEMAS)
 V06_SCHEMAS['researcher'] = obj({
     'entity': {'type':'string','minLength':1,'maxLength':120},
-    'gap': {'type':'string','minLength':1,'maxLength':200},
+    'gap': {'type':'string','minLength':1,'maxLength':80},
     'keywords': {'type':'array','minItems':1,'maxItems':4,
                  'items':{'type':'string','minLength':1,'maxLength':80}},
     'strategy': {'type':'string','enum':['broad','exact_entity','official_site','pdf','gap']},

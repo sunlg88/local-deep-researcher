@@ -1,6 +1,7 @@
 """Project-scoped source queue and durable model-result replay for v0.5."""
 import json
 from .pm_documents import text_ranges
+from .pm_diagnostics import safe_error
 from .pm_store import digest, now
 from .pm_types import Settings
 from .pm_budget import request_parts, FixedPromptBudgetError, preflight_research_start
@@ -228,7 +229,7 @@ class SinglePass:
     def recover_extraction(self,s,exc):
         item=s['document_queue'][0]
         attempts=item['attempts']+1
-        message=f'{type(exc).__name__}: {exc}'[:1500]
+        message=f'{type(exc).__name__}: {safe_error(exc)}'[:1500]
         s['errors']=s.get('errors',0)+1;s['last_error']=message
         self.store.log(s['id'],'WORK_ERROR',json.dumps({'stage':'extract','document':item['did'],'error':message}))
         if isinstance(exc,FixedPromptBudgetError):

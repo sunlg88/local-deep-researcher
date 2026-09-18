@@ -36,11 +36,22 @@ def validate_intent(data: dict, known_domains: set[str]) -> ResearchIntent:
     if not isinstance(data, dict) or set(data) != keys:
         raise ValueError('Researcher must return entity/gap/keywords/strategy/language/site_hint only')
     entity = _bounded(data['entity'], 'entity', 120)
-    gap = _bounded(data['gap'], 'gap', 200)
+    gap = _bounded(data['gap'], 'gap', 80)
+    if re.search(r'[,;|/]', entity):
+        raise ValueError('entity: choose ONE name, not a list of entities')
+    # Reject instruction dumps instead of silently truncating requirements.
+    if (len(gap.split()) > 10 or re.search(r'(?<!\d),(?!\d)|[;!?]|\.\s', gap) or
+        re.search(r'\b(?:please|confirm|verify|check whether|need to|must|data preservation)\b', gap, re.I) or
+        any(x in gap for x in ('\ud655\uc778 \ud544\uc694','\ub370\uc774\ud130 \ubcf4\uc874','\uc5ec\ubd80','\ubbf8\ud655\uc778'))):
+        raise ValueError('gap: choose ONE short search phrase, not instructions or a multi-item checklist')
+    if data.get('language') == 'en' and re.search(r'[\uac00-\ud7af\u3040-\u30ff]', gap):
+        raise ValueError('language: use English search words for en, or select the actual query language')
     kw = data['keywords']
     if not isinstance(kw, list) or not 1 <= len(kw) <= 4:
         raise ValueError('Expected 1..4 keywords')
     keywords = tuple(dict.fromkeys(_bounded(k, 'keyword', 80) for k in kw))
+    if any(len(k.split()) > 8 or re.search(r'[;!?]', k) for k in keywords):
+        raise ValueError('keywords: use short topic phrases, not instructions')
     if data['strategy'] not in STRATEGIES:
         raise ValueError('Unknown research strategy')
     if data['language'] not in ('en','ko','ja','zh','de','fr','es','pt','ru','it','ar','auto'):
@@ -55,7 +66,9 @@ def validate_intent(data: dict, known_domains: set[str]) -> ResearchIntent:
         approved = {d.casefold().rstrip('.') for d in known_domains}
         if not any(hint == d or hint.endswith('.' + d) for d in approved):
             raise ValueError('Unobserved/unapproved site_hint; do not guess an official domain')
-    return ResearchIntent(entity, gap, keywords, data['strategy'], data['language'], hint)
+    intent = ResearchIntent(entity, gap, keywords, data['strategy'], data['language'], hint)
+    compile_query(intent, 'duckduckgo')  # Enforce the final query budget at the producer boundary.
+    return intent
 
 
 def compile_query(intent: ResearchIntent, backend: str) -> str:
@@ -68,8 +81,8 @@ def compile_query(intent: ResearchIntent, backend: str) -> str:
     if intent.strategy == 'pdf':
         parts.append('filetype:pdf')
     q = ' '.join(parts)
-    if len(q) > 600:
-        raise ValueError('Compiled query exceeds 600 characters; shorten semantic intent')
+    if len(q) > 300 or len(q.split()) > 24:
+        raise ValueError('gap/keywords: compiled query exceeds 300 characters or 24 words; select one compact gap')
     return q
 
 
@@ -94,3 +107,22 @@ def query_variants(intent: ResearchIntent, mode: str, zero_yield_streak: int = 0
     if mode == 'quality':
         return (variants[offset:] + variants[:offset])[:3]
     return [variants[offset]]
+
+
+def intent_anchors(intent: ResearchIntent) -> list[str]:
+    """Short ranking hints, distinct from the full preserved intent/query.
+
+    A long legal entity name remains intact in the query; only its inexpensive
+    ranking hints are split. Every producer satisfies the downstream <=100 cap.
+    """
+    anchors = []
+    for value in (intent.entity, intent.gap, *intent.keywords):
+        while len(value) > 100:
+            cut = value.rfind(' ', 0, 101)
+            if cut < 1:
+                cut = 100
+            anchors.append(value[:cut])
+            value = value[cut:].strip()
+        if value:
+            anchors.append(value)
+    return list(dict.fromkeys(anchors))[:6]

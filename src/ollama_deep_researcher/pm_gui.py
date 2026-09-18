@@ -46,14 +46,14 @@ class App:
         self._metric_cache = {}
         self.reference_label = tk.StringVar(value='참조 프로젝트: 선택 없음 (완전 독립)')
         self.refresh_token = None
-        root.title('Research PM 0.6 - \uadfc\uac70 \uc911\uc2ec \uc5f0\uad6c\uc2e4')
+        root.title('Research PM 0.6.1 - \uadfc\uac70 \uc911\uc2ec \uc5f0\uad6c\uc2e4')
         root.geometry('1200x880'); root.minsize(1050, 760)
         style = ttk.Style(root); style.theme_use('clam')
         style.configure('.', font=('Malgun Gothic', 10))
         style.configure('Treeview', rowheight=32)
         style.configure('Title.TLabel', font=('Malgun Gothic', 20, 'bold'))
         outer = ttk.Frame(root, padding=16); outer.pack(fill='both', expand=True)
-        ttk.Label(outer, text='Research PM 0.6  |  원문을 쌓는 리서치 연구실', style='Title.TLabel').pack(anchor='w')
+        ttk.Label(outer, text='Research PM 0.6.1  |  원문을 쌓는 리서치 연구실', style='Title.TLabel').pack(anchor='w')
         ttk.Label(outer, text='\uacc4\ud68d > \uc870\uc0ac > \ucd94\ucd9c > \ube44\ud310 \uac80\ud1a0 > \uc885\ud569  |  \ub3d9\uc77c \ubaa8\ub378 \uc21c\ucc28 \uc2e4\ud589  |  \ucd5c\uc885 \uc0ac\ub78c \uac80\ud1a0 \ud544\uc218').pack(anchor='w', pady=(5,12))
         cfg = Settings()
         self.url = tk.StringVar(value=cfg.ollama_url)
@@ -141,7 +141,7 @@ class App:
         self.saved.bind('<<ComboboxSelected>>', self.select_saved)
         self.status = tk.StringVar(value='연구 주제를 입력하고 Ollama 연결을 확인하세요. 일반 웹 조사는 도메인 입력이 필요 없습니다.')
         ttk.Label(outer, textvariable=self.status, wraplength=1120).pack(anchor='w', pady=10)
-        self.efficiency_status=tk.StringVar(value='v0.6 / \uc2e4\uc81c \uc870\uc0ac \ud488\uc9c8\uc740 \uc6d0\ubb38\uc73c\ub85c \ud655\uc778\ud558\uc138\uc694.')
+        self.efficiency_status=tk.StringVar(value='v0.6.1 / \uc2e4\uc81c \uc870\uc0ac \ud488\uc9c8\uc740 \uc6d0\ubb38\uc73c\ub85c \ud655\uc778\ud558\uc138\uc694.')
         ttk.Label(outer,textvariable=self.efficiency_status,wraplength=1120).pack(anchor='w',pady=(0,6))
         tabs = ttk.Notebook(outer); tabs.pack(fill='both', expand=True)
         task_tab, report_tab, log_tab = [ttk.Frame(tabs) for _ in range(3)]
@@ -355,7 +355,7 @@ class App:
                     self.status.set(self.status.get()+f" | 선별 {m['hits_screened']} / 제외 {m['prefilter_rejected']} | 중복 수집 절약 {m['duplicate_fetch_avoided']} | 유효 추출 {ratio_label}")
                 if s.get('engine_version')==6:
                     self.efficiency_status.set(
-                        f"v0.6 / {s['settings'].get('optimization_mode','balanced')} | "
+                        f"v0.6.1 / {s['settings'].get('optimization_mode','balanced')} | "
                         f"\ubcf4\ub958 \ubb38\uc11c {m.get('deferred_documents',0)} | "
                         f"\ub3d9\uc77c \ubcf8\ubb38 \uc7ac\uc0ac\uc6a9 {m.get('duplicate_bodies_avoided',0)} | "
                         f"\ubbf8\uc5f4\ub78c \ubb38\uc790 {m.get('unread_characters',0):,} "

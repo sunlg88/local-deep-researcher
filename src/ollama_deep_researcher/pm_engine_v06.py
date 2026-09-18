@@ -35,6 +35,14 @@ class EngineV06(SinglePassV06,SearchCycleV06,EngineV05):
             self.semantic_backend=build_backend(cfg)
             self.semantic_backend.check=lambda:self.check(store.project_id)
 
+    def upgrade_budget_checkpoint(self,s):
+        super().upgrade_budget_checkpoint(s)
+        if s.get('hotfix_version')!='0.6.1':
+            s['hotfix_version']='0.6.1'
+            self.store.log(s['id'],'HOTFIX_POLICY',json.dumps({'version':'0.6.1',
+                'engine_version':6,'context_tokens':s['settings']['context_tokens'],
+                'completed_work_preserved':True}))
+
     def pending_search(self,task):
         return bool(task.get('active_search_id') or task.get('query_queue_v06'))
 
@@ -79,6 +87,7 @@ class EngineV06(SinglePassV06,SearchCycleV06,EngineV05):
             marker=c.execute('SELECT data FROM search_intents_v06 WHERE attempt_id=?',(aid,)).fetchone()
             before=json.loads(marker[0]).get('evidence_rowid_before',0) if marker else 0
             new_ids={r[0] for r in c.execute('SELECT id FROM evidence WHERE rowid>?',(before,))}
+        out['focus_deferred_hits']=sum(x=='FOCUS_DEFERRED' for x in statuses)
         out['accepted_claims']=len(ids)
         out['new_accepted_claims']=len(ids & new_ids)
         out['relevant_documents']=len(relevant)
