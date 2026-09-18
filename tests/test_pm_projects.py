@@ -1,4 +1,5 @@
 """Offline acceptance tests for physical project boundaries and explicit reuse."""
+from contextlib import closing
 import hashlib
 import json
 from pathlib import Path
@@ -31,7 +32,7 @@ class Projects(unittest.TestCase):
         sa, sb = w.open(a), w.open(b)
         sa.add_document('https://example.org/a', 'Forging', 'Forging press capacity is 100 t.')
         self.assertNotEqual(sa.path, sb.path)
-        self.assertEqual(sa.path, self.root / 'projects' / a / 'project.sqlite3')
+        self.assertEqual(sa.path, (self.root / 'projects' / a / 'project.sqlite3').resolve())
         self.assertEqual(sb.counts()['documents'], 0)
         self.assertEqual(w.load(b)['reference_projects'], [])
         self.assertEqual(w.reference_candidates(b, 'forging press'), [])
@@ -108,7 +109,7 @@ class Projects(unittest.TestCase):
         self.assertTrue((self.root / 'research.sqlite3').exists())
         backups = list((self.root / 'backups').glob('*.sqlite3'))
         self.assertEqual(len(backups), 1)
-        with sqlite3.connect(backups[0]) as c:
+        with closing(sqlite3.connect(backups[0])) as c:
             self.assertEqual(c.execute('SELECT count(*) FROM documents').fetchone()[0], 2)
         self.assertEqual(w.open(b).counts()['documents'], 0)
         self.assertEqual(w.open(a).counts()['documents'], 1)
