@@ -20,5 +20,7 @@ class Desktop(unittest.TestCase):
             try:
                 app = App(root, Path(folder)); root.update(); app.refresh()
                 self.assertEqual(app.model.get(), 'qwen3.5:9b')
+                self.assertEqual(app.source_policy.get(), '일반 웹 조사'); self.assertEqual(app.domains.get(), '')
+                self.assertEqual(app.settings().source_mode, 'open')
                 self.assertIsNotNone(app.start_button); self.assertIsNotNone(app.pause_button)
             finally: root.destroy()
