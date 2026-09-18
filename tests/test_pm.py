@@ -10,7 +10,7 @@ from ollama_deep_researcher.pm_engine import Engine
 TEXT = 'The test press has a capacity of 100 t.'
 
 def claim(text=TEXT, value='100', period='2025'):
-    return dict(entity='TEST', metric='press', value=value, unit='t', period=period, scope='capacity', quote=text)
+    return dict(entity='TEST', subentity='test press', metric='press', value=value, unit='t', period=period, scope='capacity', quote=text)
 
 def review(ids, passed=True):
     return {'checks': [{'criterion': 'c1', 'passed': passed, 'evidence_ids': ids, 'reason': 'Synthetic check'}], 'issues': []}
@@ -113,7 +113,7 @@ class FakeModel:
         if role == 'planner':
             return {'tasks': [{'title': 'TEST press capacity', 'query': 'TEST press', 'criteria': ['Identify rated capacity with primary text']}]}
         if role == 'researcher': return {'query': 'TEST press capacity ' + str(len(self.roles))}
-        if role == 'extractor': return {'claims': [claim()]}
+        if role == 'extractor': return {'relevance':'relevant', 'reason':'Synthetic source matches the task', 'claims': [claim()]}
         if role == 'critic': return review([e['id'] for e in payload['evidence']], not self.reject)
         if role == 'writer':
             return {'summary': 'Synthetic finding ' + ' '.join('[' + x + ']' for x in payload['evidence_ids']),
@@ -130,25 +130,29 @@ class Flow(Base):
         return self.store.load(self.pid)
     def test_all_five_roles_execute(self):
         model = FakeModel(); s = self.run_pm(model)
-        self.assertEqual(s['status'], 'COMPLETED_REVIEW_REQUIRED'); self.assertEqual(s['tasks'][0]['status'], 'DONE')
+        self.assertEqual(s['status'], 'NO_NEW_WORK'); self.assertEqual(s['tasks'][0]['status'], 'COLLECTED')
+        self.assertEqual(self.store.counts()['evidence'],1)
         self.assertEqual(set(model.roles), {'planner', 'researcher', 'extractor', 'critic', 'writer'})
-    def test_failed_critic_blocks_after_retry_limit(self):
+    def test_negative_critic_marks_review_without_discarding_source(self):
         s = self.run_pm(FakeModel(True))
-        self.assertEqual(s['status'], 'PARTIAL'); self.assertEqual(s['tasks'][0]['status'], 'BLOCKED'); self.assertEqual(s['tasks'][0]['attempts'], 2)
+        self.assertEqual(s['status'], 'NO_NEW_WORK'); self.assertEqual(s['tasks'][0]['status'], 'COLLECTED'); self.assertEqual(s['tasks'][0]['attempts'], 2)
+        self.assertEqual(self.store.all_evidence()[0]['review_status'],'NEEDS_REVIEW')
     def test_pause_then_resume(self):
         engine = Engine(self.store, FakeModel(), FakeWeb()); engine.step(self.pid)
         self.store.control(self.pid, 'PAUSE'); before = self.store.load(self.pid)['calls']; engine.run(self.pid)
         self.assertEqual(self.store.load(self.pid)['calls'], before); self.assertEqual(self.store.load(self.pid)['status'], 'PAUSED')
         self.store.control(self.pid, 'RUN'); engine.run(self.pid)
-        self.assertEqual(self.store.load(self.pid)['status'], 'COMPLETED_REVIEW_REQUIRED')
+        self.assertEqual(self.store.load(self.pid)['status'], 'NO_NEW_WORK')
     def test_new_engine_resumes_saved_stage(self):
         engine = Engine(self.store, FakeModel(), FakeWeb()); engine.step(self.pid); engine.step(self.pid)
         model = FakeModel(); Engine(Store(self.root), model, FakeWeb()).run(self.pid)
-        self.assertNotIn('planner', model.roles); self.assertEqual(self.store.load(self.pid)['status'], 'COMPLETED_REVIEW_REQUIRED')
+        self.assertNotIn('planner', model.roles); self.assertEqual(self.store.load(self.pid)['status'], 'NO_NEW_WORK')
     def test_no_sources_is_not_success(self):
         class Empty(FakeWeb):
             def search(self, query): return []
-        self.assertEqual(self.run_pm(web=Empty())['status'], 'PARTIAL')
+        s=self.run_pm(web=Empty())
+        self.assertEqual(s['status'], 'NO_NEW_WORK');self.assertEqual(s['tasks'][0]['status'],'NO_FINDINGS')
+        self.assertEqual(self.store.counts()['documents'],0)
     def test_global_call_budget(self):
         s = self.store.load(self.pid); s['settings']['max_calls'] = 1; self.store.save(s)
         s = self.run_pm(); self.assertEqual(s['calls'], 1); self.assertEqual(s['status'], 'BUDGET_EXHAUSTED')
@@ -158,7 +162,8 @@ class Flow(Base):
     def test_model_error_is_bounded_and_saved(self):
         class Broken(FakeModel):
             def ask(self, role, payload, check): raise ValueError('malformed JSON fixture')
-        s = self.run_pm(Broken()); self.assertEqual(s['status'], 'ERROR'); self.assertLessEqual(s['calls'], 3); self.assertTrue(s['last_error'])
+        s = self.run_pm(Broken()); self.assertEqual(s['status'], 'NO_NEW_WORK'); self.assertLessEqual(s['calls'], 4); self.assertTrue(s['last_error'])
+        self.assertTrue(s['planner_fallback']);self.assertEqual(self.store.counts()['evidence'],0)
 
 class Regressions(Base):
     def test_more_than_200_records_are_not_dropped(self):
@@ -172,11 +177,13 @@ class Regressions(Base):
             s['tasks'].append(dict(id=f't{i}', title=f'Task {i}', status='DONE', attempts=1, criteria=self.task['criteria'], feedback=[], evidence_ids=[eid], accepted_ids=[eid]))
         self.store.save(s); model = FakeModel(); Engine(self.store, model, FakeWeb()).run(self.pid)
         self.assertEqual(model.roles.count('writer'), 3); self.assertEqual(len(self.store.load(self.pid)['draft_sections']), 3)
-    def test_later_conflict_invalidates_completed_task(self):
+    def test_later_conflict_remains_visible_without_deleting_either_source(self):
         eid = self.evidence(); self.evidence('https://example.net/b', 'The test press has a capacity of 120 t.', '120')
         s = self.store.load(self.pid); s['stage'] = 'writer'; s['tasks'] = [dict(id='t1', title='TEST', status='DONE', attempts=1, criteria=[], feedback=[], evidence_ids=[eid], accepted_ids=[eid])]
         self.store.save(s); Engine(self.store, FakeModel(), FakeWeb()).run(self.pid)
-        self.assertEqual(self.store.load(self.pid)['status'], 'PARTIAL')
+        s=self.store.load(self.pid)
+        self.assertEqual(s['status'],'NO_NEW_WORK');self.assertEqual(s['tasks'][0]['conflict_candidates'],[eid])
+        self.assertEqual(self.store.counts()['evidence'],2)
     def test_second_worker_refused(self):
         with worker_lock(self.root):
             with self.assertRaises(RuntimeError):
@@ -188,4 +195,6 @@ class Regressions(Base):
                 if role == 'writer': result['summary'] = 'Unsupported [e-invented123].'
                 return result
         Engine(self.store, BadWriter(), FakeWeb()).run(self.pid)
-        self.assertEqual(self.store.load(self.pid)['status'], 'ERROR')
+        s=self.store.load(self.pid)
+        self.assertEqual(s['status'],'NO_NEW_WORK');self.assertFalse(s['draft_sections'])
+        self.assertTrue(s['tasks'][0]['draft_error']);self.assertEqual(self.store.counts()['evidence'],1)

@@ -43,7 +43,7 @@ class Transport(unittest.TestCase):
         self.assertFalse(Handler.received[0]['think']); self.assertEqual(Handler.received[0]['options']['num_ctx'], 8192)
     def test_critic_thinking_and_json(self):
         self.model.ask('critic', {}, lambda: None)
-        self.assertTrue(Handler.received[0]['think']); self.assertEqual(Handler.received[0]['format'], 'json')
+        self.assertTrue(Handler.received[0]['think']); self.assertEqual(Handler.received[0]['format']['type'], 'object'); self.assertIn('checks', Handler.received[0]['format']['properties'])
     def test_output_limit_not_silent_success(self):
         Handler.mode = 'length'
         with self.assertRaises(ValueError): self.model.ask('planner', {}, lambda: None)
@@ -105,3 +105,57 @@ class SearchWorker(unittest.TestCase):
         with patch.dict(os.environ, self.env), patch('subprocess.Popen', side_effect=record):
             with self.assertRaises(InterruptedError): web.search('fixture')
         self.assertTrue(children); self.assertIsNotNone(children[0].poll())
+
+class SourceTransport(unittest.TestCase):
+    def response(self, data, kind):
+        import email.message
+        import io
+        from unittest.mock import MagicMock
+        headers = email.message.Message()
+        headers['Content-Type'] = kind
+        response = MagicMock()
+        response.headers = headers
+        response.read1.side_effect = io.BytesIO(data).read
+        response.__enter__.return_value = response
+        return response
+
+    def test_full_html_raw_and_unicode_request_are_preserved(self):
+        from unittest.mock import MagicMock
+        raw = '<html><p>\ud55c\uae00 source text with original markup.</p></html>'.encode()
+        response = self.response(raw, 'text/html; charset=utf-8')
+        http = MagicMock(); http.open.return_value = response
+        with patch('ollama_deep_researcher.pm_io.public_url', side_effect=lambda x:x), patch('ollama_deep_researcher.pm_io.opener', return_value=http):
+            result = Web(Settings()).fetch_document('https://example.org/\ud55c\uae00')
+        self.assertEqual(result.raw, raw)
+        self.assertIn('\ud55c\uae00 source', result.body)
+        self.assertNotIn('<p>', result.body)
+        http.open.call_args.args[0].full_url.encode('ascii')
+        self.assertIn('final_url', result.metadata)
+
+    def test_invalid_pdf_returns_original_and_parse_failure(self):
+        from unittest.mock import MagicMock
+        raw = b'%PDF-1.7\ninvalid fixture'
+        http=MagicMock(); http.open.return_value=self.response(raw, 'application/pdf')
+        with patch('ollama_deep_researcher.pm_io.public_url',side_effect=lambda x:x), patch('ollama_deep_researcher.pm_io.opener',return_value=http):
+            result=Web(Settings()).fetch_document('https://example.org/a.pdf')
+        self.assertEqual(result.raw,raw)
+        self.assertEqual(result.body,'')
+        self.assertEqual(result.metadata['parse_status'],'PARSE_FAILED')
+
+    def test_pdf_parser_process_terminates_on_user_stop(self):
+        from ollama_deep_researcher import pm_io
+        self.assertTrue(hasattr(pm_io, 'parse_pdf_isolated'))
+        children=[]; original=subprocess.Popen
+        def record(*args,**kwargs):
+            child=original(*args,**kwargs);children.append(child);return child
+        def stop(): raise InterruptedError('user stopped parser')
+        with patch('subprocess.Popen',side_effect=record):
+            with self.assertRaises(InterruptedError):
+                pm_io.parse_pdf_isolated(b'%PDF-1.7\nfixture', stop)
+        self.assertTrue(children)
+        self.assertIsNotNone(children[0].poll())
+
+    def test_schema_is_sent_to_ollama_instead_of_json_string(self):
+        from ollama_deep_researcher.pm_prompts import SCHEMAS
+        self.assertEqual(SCHEMAS['extractor']['properties']['relevance']['enum'],['relevant','uncertain','irrelevant'])
+        self.assertEqual(SCHEMAS['extractor']['properties']['claims']['maxItems'],3)

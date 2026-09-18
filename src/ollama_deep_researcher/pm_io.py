@@ -14,6 +14,8 @@ from urllib.parse import urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from .pm_types import canonical_url, parse_json
+from .pm_documents import FetchedDocument, decode_document
+from .pm_prompts import SCHEMAS, OutputLimitError
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -107,19 +109,24 @@ class Web:
                         process.wait(timeout=5)
 
     def fetch(self, url):
+        """Compatibility adapter. New engine calls fetch_document to keep originals."""
+        return self.fetch_document(url).body
+
+    def fetch_document(self, url):
+        original_url = url
         started = time.monotonic()
         for _ in range(4):
             self.check()
+            url = canonical_url(url)
             if not self.settings.allows(url):
                 raise ValueError('Source blocked by the selected source policy')
             url = public_url(url)
-            request = Request(url, headers={'User-Agent': 'LocalResearchPM/0.2 (read-only research)',
-                                            'Accept': 'text/html,text/plain'})
+            request = Request(url, headers={'User-Agent': 'LocalResearchPM/0.4 (read-only research)',
+                          'Accept': 'text/html,text/plain,application/xhtml+xml,application/pdf'})
             try:
                 with opener().open(request, timeout=15) as response:
                     kind = response.headers.get_content_type()
-                    if kind not in ('text/html', 'text/plain', 'application/xhtml+xml'):
-                        raise ValueError('Unsupported source type (PDF/OCR is not enabled): ' + kind)
+                    charset = response.headers.get_content_charset()
                     chunks, total = [], 0
                     while True:
                         self.check()
@@ -129,25 +136,55 @@ class Web:
                         if not chunk:
                             break
                         total += len(chunk)
-                        if total > 2_000_000:
-                            raise ValueError('Source exceeds 2 MB fetch limit')
+                        if total > self.settings.max_source_bytes:
+                            raise ValueError('Source exceeds configured original-byte limit')
                         chunks.append(chunk)
                     raw = b''.join(chunks)
-                    if raw.startswith(b'%PDF'):
-                        raise ValueError('PDF source requires the future PDF reader')
-                    text = raw.decode(response.headers.get_content_charset() or 'utf-8', errors='replace')
-                    if kind != 'text/plain':
-                        parser = TextHTML()
-                        parser.feed(text)
-                        text = '\n'.join(' '.join(line.split()) for line in ''.join(parser.parts).splitlines() if line.strip())
-                    if len(text) > 200000:
-                        raise ValueError('Extracted source exceeds 200000 characters')
-                    return text
+                    if kind == 'application/pdf' or raw.startswith(b'%PDF'):
+                        decoded = parse_pdf_isolated(raw, self.check)
+                    else:
+                        decoded = decode_document(raw, kind, charset)
+                    meta = decoded['metadata']
+                    meta.update(original_url=original_url, final_url=url,
+                                content_type='application/pdf' if raw.startswith(b'%PDF') else kind)
+                    return FetchedDocument(decoded['body'], raw, meta)
             except HTTPError as exc:
-                if exc.code not in (301, 302, 303, 307, 308) or not exc.headers.get('Location'):
+                if exc.code not in (301,302,303,307,308) or not exc.headers.get('Location'):
                     raise
                 url = urljoin(url, exc.headers['Location'])
         raise ValueError('Too many source redirects')
+
+
+def parse_pdf_isolated(raw, check, timeout=30):
+    """Retain the original even when parsing fails; terminate child on cancellation."""
+    with tempfile.TemporaryDirectory(prefix='research-pm-pdf-') as folder:
+        source, target = Path(folder)/'original.pdf', Path(folder)/'parsed.json'
+        source.write_bytes(raw)
+        with open(Path(folder)/'parser.log', 'wb') as log:
+            process = subprocess.Popen([sys.executable, '-m', 'ollama_deep_researcher.pm_pdf_worker',
+                                        str(source), str(target)], stdout=log, stderr=log)
+            started=time.monotonic()
+            try:
+                check()
+                while process.poll() is None:
+                    check()
+                    if time.monotonic()-started>timeout:
+                        return {'body':'', 'metadata':{'parse_status':'PARSE_TIMEOUT',
+                            'warnings':['PDF parser timed out; original bytes retained for reprocessing']}}
+                    time.sleep(0.1)
+                if process.returncode != 0 or not target.exists() or target.stat().st_size>16_000_000:
+                    log.flush()
+                    detail=(Path(folder)/'parser.log').read_text(encoding='utf-8',errors='replace')[-1500:]
+                    return {'body':'', 'metadata':{'parse_status':'PARSE_FAILED',
+                        'warnings':['PDF extraction failed; original bytes retained'], 'error':detail}}
+                result=json.loads(target.read_text(encoding='utf-8'))
+                if not isinstance(result.get('body'),str) or not isinstance(result.get('metadata'),dict):
+                    raise ValueError('Invalid PDF parser output')
+                return result
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
 
 
 class Ollama:
@@ -169,7 +206,7 @@ class Ollama:
             raise ValueError('Prompt byte budget exceeded')
         body = {'model': cfg.model, 'messages': [{'role': 'system', 'content': prompt},
                                                 {'role': 'user', 'content': user}],
-                'stream': True, 'format': 'json', 'think': cfg.think and role in ('planner', 'critic', 'writer'),
+                'stream': True, 'format': SCHEMAS[role], 'think': cfg.think and role in ('planner', 'critic', 'writer'),
                 'keep_alive': '30m', 'options': {'temperature': 0, 'num_ctx': cfg.context_tokens,
                                                'num_predict': cfg.output_tokens}}
         request = Request(cfg.ollama_url.rstrip('/') + '/api/chat',
@@ -191,7 +228,7 @@ class Ollama:
                 content.append(chunk.get('message', {}).get('content', ''))
                 if chunk.get('done'):
                     if chunk.get('done_reason') == 'length':
-                        raise ValueError('Generation hit output limit; incomplete response rejected')
+                        raise OutputLimitError('Generation hit output limit; incomplete response rejected')
                     self.last_metrics = {k: chunk.get(k) for k in ('prompt_eval_count', 'eval_count', 'eval_duration')}
                     done = True
                     break

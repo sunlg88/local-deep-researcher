@@ -30,7 +30,9 @@ class Delivery(Base):
                 if role == 'writer': result['summary'] = 'An unsupported prose draft.'
                 return result
         Engine(self.store, UncitedWriter(), FakeWeb()).run(self.pid)
-        self.assertEqual(self.store.load(self.pid)['status'], 'ERROR')
+        s=self.store.load(self.pid)
+        self.assertEqual(s['status'],'NO_NEW_WORK');self.assertFalse(s['draft_sections'])
+        self.assertTrue(s['tasks'][0]['draft_error']);self.assertEqual(self.store.counts()['evidence'],1)
 
     def test_allowlisted_domains_not_silently_dropped(self):
         fixture = io_fixtures.SearchWorker('test_real_subprocess_returns_fixture')

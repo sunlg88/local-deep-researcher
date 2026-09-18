@@ -24,3 +24,33 @@ class Desktop(unittest.TestCase):
                 self.assertEqual(app.settings().source_mode, 'open')
                 self.assertIsNotNone(app.start_button); self.assertIsNotNone(app.pause_button)
             finally: root.destroy()
+
+    @unittest.skipUnless(os.name == 'nt' or os.environ.get('DISPLAY'), 'Display required')
+    def test_gui_uses_isolated_store_and_explicit_reference_selection(self):
+        import tkinter as tk
+        from unittest.mock import patch
+        from ollama_deep_researcher.pm_gui import App
+        from ollama_deep_researcher.pm_projects import Workspace
+        with tempfile.TemporaryDirectory() as folder:
+            root=tk.Tk()
+            try:
+                app=App(root, Path(folder));root.update()
+                self.assertIsInstance(app.store,Workspace)
+                self.assertEqual(app.reference_ids,[])
+                self.assertTrue(hasattr(app,'reference_button'))
+                self.assertIn('time_limit_minutes',app.values)
+                self.assertEqual(app.instructions.get('1.0','end').strip(),'')
+                self.assertFalse(app.advanced.winfo_ismapped())
+                first=app.store.create('Reference project',app.settings())
+                app.reference_ids=[first]
+                app.pid=app.store.create('Isolated child',app.settings(),reference_projects=app.reference_ids)
+                captured=[]
+                class DummyEngine:
+                    def __init__(self, store, model, web): captured.append(store)
+                    def run(self,pid): pass
+                with patch('ollama_deep_researcher.pm_gui.Engine',DummyEngine):
+                    app.launch();app.worker.join(2)
+                self.assertEqual(captured[0].project_id,app.pid)
+                self.assertEqual(captured[0].path.name,'project.sqlite3')
+                self.assertFalse((Path(folder)/'research.sqlite3').exists())
+            finally: root.destroy()

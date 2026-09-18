@@ -2,7 +2,7 @@
 from dataclasses import asdict, dataclass, field
 import json
 import re
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit, quote
 
 
 @dataclass
@@ -13,9 +13,9 @@ class Settings:
     source_mode: str = 'open'
     allowed_domains: list[str] = field(default_factory=list)
     min_sources: int = 2
-    min_tasks: int = 5
+    min_tasks: int = 1
     max_tasks: int = 8
-    max_attempts: int = 3
+    max_attempts: int = 6
     max_calls: int = 240
     max_searches: int = 60
     context_tokens: int = 8192
@@ -25,13 +25,18 @@ class Settings:
     request_timeout: int = 300
     source_chars: int = 3500
     source_limit: int = 3
+    time_limit_minutes: int = 120
+    strict_final: bool = False
+    draft_enabled: bool = True
+    max_source_bytes: int = 20_000_000
 
     def __post_init__(self):
         limits = {'min_sources': (1, 10), 'min_tasks': (1, 20), 'max_tasks': (1, 20),
                   'max_attempts': (1, 20), 'max_calls': (1, 100000), 'max_searches': (1, 100000),
                   'context_tokens': (4096, 131072), 'output_tokens': (512, 16384),
                   'report_minutes': (1, 1440), 'request_timeout': (10, 3600),
-                  'source_chars': (500, 20000), 'source_limit': (1, 10)}
+                  'source_chars': (500, 20000), 'source_limit': (1, 10),
+                  'time_limit_minutes': (0, 43200), 'max_source_bytes': (100_000, 20_000_000)}
         for name, (low, high) in limits.items():
             value = getattr(self, name)
             if type(value) is not int or not low <= value <= high:
@@ -44,6 +49,8 @@ class Settings:
             raise ValueError('Unsupported source policy')
         if not isinstance(self.model, str) or not self.model.strip():
             raise ValueError('An installed Ollama model name is required')
+        if type(self.strict_final) is not bool or type(self.draft_enabled) is not bool:
+            raise ValueError('Final filter and draft switches must be boolean')
         if type(self.think) is not bool:
             raise ValueError('think must be boolean')
         canonical_url(self.ollama_url)
@@ -106,12 +113,14 @@ class Settings:
 
 
 def canonical_url(url):
-    if not isinstance(url, str) or len(url) > 4096:
+    if not isinstance(url, str) or len(url) > 4096 or any(ord(c) < 32 for c in url):
         raise ValueError('Invalid URL')
     p = urlsplit(url.strip())
     if p.scheme not in ('http', 'https') or not p.hostname or p.username or p.password:
         raise ValueError('Only HTTP(S) URLs without credentials are allowed')
     host = p.hostname.lower().rstrip('.')
+    if ':' not in host:
+        host = host.encode('idna').decode('ascii')
     if ':' in host:
         host = '[' + host + ']'
     port = p.port
@@ -119,7 +128,7 @@ def canonical_url(url):
         host += ':' + str(port)
     query = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True)
              if not k.lower().startswith('utm_') and k.lower() not in ('fbclid', 'gclid')]
-    return urlunsplit((p.scheme.lower(), host, p.path or '/', urlencode(sorted(query)), ''))
+    return urlunsplit((p.scheme.lower(), host, quote(p.path or '/', safe="/%:@!$&'()*+,;=-._~"), urlencode(sorted(query)), ''))
 
 
 def normalized(text):
