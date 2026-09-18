@@ -39,6 +39,7 @@ class App:
         self.url = tk.StringVar(value=cfg.ollama_url)
         self.model = tk.StringVar(value=cfg.model)
         self.search = tk.StringVar(value=cfg.search_api)
+        self.source_policy = tk.StringVar(value=SOURCE_MODE_NAMES[cfg.source_mode])
         self.domains = tk.StringVar(value=', '.join(cfg.allowed_domains))
         self.think = tk.BooleanVar(value=True)
         self.values = {k: tk.StringVar(value=str(getattr(cfg, k))) for k in (
@@ -97,6 +98,7 @@ class App:
     def settings(self):
         values = {k: int(v.get()) for k,v in self.values.items()}
         return Settings(model=self.model.get().strip(), ollama_url=self.url.get().strip(), search_api=self.search.get(),
+                        source_mode=SOURCE_MODE_LABELS[self.source_policy.get()],
                         allowed_domains=[d.strip() for d in self.domains.get().split(',') if d.strip()], think=self.think.get(), **values)
 
     def busy(self): return self.worker is not None and self.worker.is_alive()
@@ -111,7 +113,7 @@ class App:
         threading.Thread(target=lookup,daemon=True).start()
 
     def launch(self):
-        pid = self.pid; cfg = Settings(**self.store.load(pid)['settings'])
+        pid = self.pid; cfg = Settings.from_saved(self.store.load(pid)['settings'])
         def work():
             try: Engine(self.store,Ollama(cfg),Web(cfg)).run(pid)
             except Exception as exc: self.messages.put(('error',str(exc)))
@@ -153,7 +155,8 @@ class App:
             self.pid = self.project_ids[i]; self.report_stamp = None
             s = self.store.load(self.pid); self.topic.set(s['topic'])
             cfg = s['settings']; self.url.set(cfg['ollama_url']); self.model.set(cfg['model'])
-            self.search.set(cfg['search_api']); self.domains.set(', '.join(cfg['allowed_domains'])); self.think.set(cfg['think'])
+            self.search.set(cfg['search_api']); self.source_policy.set(SOURCE_MODE_NAMES[cfg.get('source_mode', 'allowlist')])
+            self.domains.set(', '.join(cfg['allowed_domains'])); self.think.set(cfg['think'])
             for k,v in self.values.items(): v.set(str(cfg[k]))
             self.replace(self.instructions,s['instructions'])
 
