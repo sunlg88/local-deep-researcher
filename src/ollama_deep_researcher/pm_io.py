@@ -1,4 +1,4 @@
-"""Network boundaries for local Ollama and allowlisted public HTML research."""
+"""Network boundaries for local Ollama and policy-controlled public HTML research."""
 from html.parser import HTMLParser
 import ipaddress
 import json
@@ -75,11 +75,11 @@ class Web:
     def search(self, query):
         self.check()
         # Reuse upstream adapters in a killable fixed-purpose process, not an LLM shell.
-        domains = ' OR '.join('site:' + d for d in self.settings.allowed_domains)
+        search_query = self.settings.search_query(query)
         with tempfile.TemporaryDirectory(prefix='research-pm-search-') as folder:
             request_path, result_path = Path(folder) / 'request.json', Path(folder) / 'result.json'
             request_path.write_text(json.dumps({'backend': self.settings.search_api,
-                'query': query + ' (' + domains + ')', 'max_results': self.settings.source_limit * 3}), encoding='utf-8')
+                'query': search_query, 'max_results': self.settings.source_limit * 3}), encoding='utf-8')
             with open(Path(folder) / 'worker.log', 'wb') as log:
                 process = subprocess.Popen([sys.executable, '-m', 'ollama_deep_researcher.pm_search_worker',
                                             str(request_path), str(result_path)], stdout=log, stderr=log)
@@ -100,7 +100,7 @@ class Web:
                     results = data.get('results', [])
                     if not isinstance(results, list):
                         raise ValueError('Search adapter returned invalid results')
-                    return results
+                    return self.settings.rank_hits(results)
                 finally:
                     if process.poll() is None:
                         process.kill()
@@ -111,7 +111,7 @@ class Web:
         for _ in range(4):
             self.check()
             if not self.settings.allows(url):
-                raise ValueError('Source domain is not explicitly permitted')
+                raise ValueError('Source blocked by the selected source policy')
             url = public_url(url)
             request = Request(url, headers={'User-Agent': 'LocalResearchPM/0.2 (read-only research)',
                                             'Accept': 'text/html,text/plain'})
