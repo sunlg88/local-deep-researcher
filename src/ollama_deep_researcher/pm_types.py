@@ -10,9 +10,8 @@ class Settings:
     model: str = 'qwen3.5:9b'
     ollama_url: str = 'http://localhost:11434'
     search_api: str = 'duckduckgo'
-    allowed_domains: list[str] = field(default_factory=lambda: [
-        'energy.gov', 'osti.gov', 'iaea.org', 'nrel.gov', 'jstage.jst.go.jp',
-        'sciencedirect.com', 'nature.com', 'science.org', 'springer.com'])
+    source_mode: str = 'open'
+    allowed_domains: list[str] = field(default_factory=list)
     min_sources: int = 2
     min_tasks: int = 5
     max_tasks: int = 8
@@ -41,6 +40,8 @@ class Settings:
             raise ValueError('Task limits or input/output context reservation is invalid')
         if self.search_api not in ('duckduckgo', 'searxng', 'tavily'):
             raise ValueError('Unsupported search adapter')
+        if self.source_mode not in ('open', 'preferred', 'allowlist'):
+            raise ValueError('Unsupported source policy')
         if not isinstance(self.model, str) or not self.model.strip():
             raise ValueError('An installed Ollama model name is required')
         if type(self.think) is not bool:
@@ -55,20 +56,50 @@ class Settings:
                 raise ValueError(f'Use explicit domains, not URLs or wildcards: {domain}')
             domains.append(domain)
         self.allowed_domains = sorted(set(domains))
-        if not self.allowed_domains:
-            raise ValueError('At least one explicitly allowed source domain is required')
+        if self.source_mode == 'allowlist' and not self.allowed_domains:
+            raise ValueError('Allowlist-only mode requires at least one source domain')
+
+    @classmethod
+    def from_saved(cls, data):
+        """Load persisted settings without weakening the policy of pre-v0.3 projects."""
+        values = dict(data)
+        values.setdefault('source_mode', 'allowlist')
+        return cls(**values)
 
     def group(self, url):
-        host = (urlsplit(url).hostname or '').lower().rstrip('.')
+        canonical = canonical_url(url)
+        host = (urlsplit(canonical).hostname or '').lower().rstrip('.')
         matches = [d for d in self.allowed_domains if host == d or host.endswith('.' + d)]
-        return min(matches, key=len) if matches else None
+        if matches:
+            return min(matches, key=len)
+        if self.source_mode != 'allowlist':
+            return host.removeprefix('www.')
+        return None
 
     def allows(self, url):
         try:
             canonical_url(url)
-            return self.group(url) is not None
+            return self.source_mode != 'allowlist' or self.group(url) is not None
         except ValueError:
             return False
+
+    def search_query(self, query):
+        query = str(query).strip()
+        if self.source_mode == 'allowlist':
+            domains = ' OR '.join('site:' + d for d in self.allowed_domains)
+            return query + ' (' + domains + ')'
+        return query
+
+    def rank_hits(self, hits):
+        rows = list(hits)
+        if self.source_mode != 'preferred' or not self.allowed_domains:
+            return rows
+        def preferred(hit):
+            try:
+                return 0 if self.group(hit.get('url', '')) in self.allowed_domains else 1
+            except ValueError:
+                return 1
+        return sorted(rows, key=preferred)
 
     def to_dict(self):
         return asdict(self)
@@ -136,7 +167,7 @@ def gate(task, evidence, review, settings):
     groups = {settings.group(e['url']) for e in chosen}
     hashes = {e['content_hash'] for e in chosen}
     if min(len(groups), len(hashes)) < settings.min_sources:
-        reasons.append(f'Need {settings.min_sources} distinct allowed source groups and document bodies')
+        reasons.append(f'Need {settings.min_sources} distinct source groups and document bodies')
     if review.get('issues'):
         reasons.append('Critic raised unresolved issues: ' + str(review['issues'])[:800])
     return not reasons, reasons, sorted(selected)
