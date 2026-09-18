@@ -15,8 +15,8 @@ The Korean GUI was constructed, refreshed, captured and visually inspected.
 Test coverage includes quote rejection, source identity, mirrored-body deduplication,
 conflict detection, immutable task criteria, unknown evidence IDs, missing citations,
 persisted budgets, pause/resume, reopening SQLite, per-task synthesis, preservation
-of older evidence, allowlisted domain coverage, and cancellation of an actual child
-process. A local HTTP server exercised Ollama NDJSON transport and model discovery.
+of older evidence, open/preferred/allowlist source policies, allowlisted-domain
+coverage, and cancellation of an actual child process. A local HTTP server exercised Ollama NDJSON transport and model discovery.
 
 The model and search outputs in these tests are SYNTHETIC FIXTURES. Tests do not
 prove Qwen research accuracy, Windows compatibility, live web access, throughput,
@@ -51,8 +51,9 @@ Evidence exports retain historical task links; prompt trimming does not delete t
 ## Security and scope
 
 The model cannot run arbitrary commands. A fixed-purpose search subprocess reuses
-upstream adapters and is killed on cancellation/timeout. Source URLs must be HTTP(S),
-allowlisted, without credentials, and resolve to public addresses. This is defense
+upstream adapters and is killed on cancellation/timeout. Source URLs must be HTTP(S), without credentials, and resolve to public addresses.
+The default open policy accepts public web domains; preferred mode promotes configured
+domains without blocking others; allowlist mode blocks every unlisted domain. This is defense
 in depth, not a complete DNS-rebinding-resistant network sandbox. Webpage content is
 untrusted; prompts instruct the model not to treat it as tool or policy instructions.
 
@@ -69,8 +70,8 @@ The new GUI and search child disable LangSmith tracing. Nothing uploads to GPT.
 
 ## Next validation on the user's laptop
 
-Use a narrow topic with manually known answers and permitted source domains.
-Verify source quotations and values against the actual pages, record usable evidence
+Use a narrow topic with manually known answers. Start with the default open-web mode;
+then separately exercise preferred and strict allowlist modes. Verify source quotations and values against the actual pages, record usable evidence
 per hour, false claims, missing facts and manual correction time. Then test interrupted
 runs and increasingly long sessions. Do not interpret the synthetic test suite as a
 research productivity benchmark or deploy sensitive company data without approval.
