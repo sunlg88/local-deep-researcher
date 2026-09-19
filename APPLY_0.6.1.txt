@@ -1,0 +1,15 @@
+Research PM 0.6.1 - update for the existing 0.6 program folder
+
+Stop PM and close its window before copying these files.
+Back up the entire pm_data folder to a different location.
+Extract this ZIP at the folder containing START_RESEARCH_PM.bat.
+Keep pm_data and .pm-venv. No new dependency is required for the default path.
+Launch the existing START_RESEARCH_PM.bat; verify Research PM 0.6.1 in the window title.
+
+Resume an unfinished v0.6 project with its usual resume button.
+The engine stays version 6; this is a hotfix, not a new-project conversion.
+A terminal/completed research run needs a new project; references remain explicit.
+For clean comparison, start a new research project with no references.
+Default test settings: DuckDuckGo / qwen3.5:9b / 8192 / 3072 / balanced / semantic off.
+
+See docs/RESEARCH_PM_V0_6_1_HOTFIX.md for exact scope and remaining live checks.

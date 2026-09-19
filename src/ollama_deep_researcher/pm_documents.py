@@ -17,20 +17,24 @@ class SourceHTML(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.parts, self.skip = [], []
+        self.in_title=False; self.title_parts=[]
 
     def handle_starttag(self, tag, attrs):
+        if tag=="title": self.in_title=True
         if tag in ('script', 'style', 'nav', 'footer', 'header', 'aside', 'noscript'):
             self.skip.append(tag)
         if tag in ('p', 'div', 'br', 'tr', 'li', 'h1', 'h2', 'h3', 'section') and not self.skip:
             self.parts.append('\n')
 
     def handle_endtag(self, tag):
+        if tag=="title": self.in_title=False
         if self.skip and tag == self.skip[-1]:
             self.skip.pop()
         if tag in ('p', 'div', 'tr', 'li', 'section') and not self.skip:
             self.parts.append('\n')
 
     def handle_data(self, data):
+        if self.in_title: self.title_parts.append(data)
         if not self.skip:
             self.parts.append(data + ' ')
 
@@ -135,6 +139,7 @@ def decode_document(raw, content_type, charset=None):
     if content_type != 'text/plain':
         parser = SourceHTML()
         parser.feed(text)
+        metadata['title']=' '.join(''.join(parser.title_parts).split())[:500]
         text = '\n'.join(' '.join(line.split()) for line in ''.join(parser.parts).splitlines() if line.strip())
     if len(text) > 2_000_000:
         text = text[:2_000_000]

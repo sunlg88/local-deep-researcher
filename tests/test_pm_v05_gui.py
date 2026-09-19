@@ -80,7 +80,7 @@ class Desktop05(unittest.TestCase):
         self.root=tk.Tk();self.addCleanup(self.root.destroy)
         self.app=App(self.root,Path(self.tmp.name));self.root.update()
     def test_version_and_productivity_columns(self):
-        self.assertIn('0.5',self.root.title())
+        self.assertIn('0.6',self.root.title())
         for key in ('searches','fetched','relevant','zero_yield'):
             self.assertIn(key,self.app.table['columns'])
     def test_gui_preflight_rejects_before_creating_project(self):

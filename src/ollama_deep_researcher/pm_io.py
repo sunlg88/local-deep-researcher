@@ -71,6 +71,11 @@ def passage(text, query, chars):
 
 
 class Web:
+    worker_module = "ollama_deep_researcher.pm_search_worker"
+
+    def search_reply(self, data):
+        return data.get("results", [])
+
     def __init__(self, settings):
         self.settings = settings
         self.check = lambda: None
@@ -85,7 +90,7 @@ class Web:
             request_path.write_text(json.dumps({'backend': self.settings.search_api,
                 'query': search_query, 'max_results': self.settings.source_limit * 3}), encoding='utf-8')
             with open(Path(folder) / 'worker.log', 'wb') as log:
-                process = subprocess.Popen([sys.executable, '-m', 'ollama_deep_researcher.pm_search_worker',
+                process = subprocess.Popen([sys.executable, '-m', self.worker_module,
                                             str(request_path), str(result_path)], stdout=log, stderr=log)
                 start = time.monotonic()
                 try:
@@ -101,7 +106,7 @@ class Web:
                     if not result_path.exists() or result_path.stat().st_size > 2_000_000:
                         raise ValueError('Search adapter returned missing or excessive data')
                     data = json.loads(result_path.read_text(encoding='utf-8'))
-                    results = data.get('results', [])
+                    results = self.search_reply(data)
                     if not isinstance(results, list):
                         raise ValueError('Search adapter returned invalid results')
                     return self.settings.rank_hits(results)
@@ -214,7 +219,12 @@ class Ollama:
                           data=json.dumps(body).encode('utf-8'), headers={'Content-Type': 'application/json'})
         started, content, total = time.monotonic(), [], 0
         check()
-        with opener().open(request, timeout=min(cfg.request_timeout, 60)) as response:
+        self.last_metrics['response_stage']='transport_open'
+        # CPU/cold-load prompt evaluation can exceed 60s before the first byte.
+        # Respect the configured v0.6 inference deadline; retain legacy policy.
+        socket_timeout=cfg.request_timeout if payload.get('_pm_version')==6 else min(cfg.request_timeout,60)
+        self.last_metrics['socket_timeout_seconds']=socket_timeout
+        with opener().open(request, timeout=socket_timeout) as response:
             done = False
             for line in response:
                 check()
@@ -223,7 +233,9 @@ class Ollama:
                 total += len(line)
                 if total > 2_000_000:
                     raise ValueError('Ollama response exceeds transport budget')
+                self.last_metrics['response_stage']='stream_decode'
                 chunk = json.loads(line)
+                self.last_metrics['response_stage']='inference_response'
                 if chunk.get('error'):
                     raise RuntimeError(str(chunk['error']))
                 message = chunk.get('message', {})
@@ -249,5 +261,9 @@ class Ollama:
                     done = True
                     break
             if not done:
+                self.last_metrics['response_stage']='stream_completion'
                 raise ValueError('Ollama stream ended without completion')
-        return parse_json(''.join(content))
+        self.last_metrics['response_stage']='response_json'
+        result=parse_json(''.join(content))
+        self.last_metrics['response_stage']='complete'
+        return result

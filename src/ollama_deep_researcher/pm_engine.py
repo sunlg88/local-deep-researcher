@@ -5,6 +5,7 @@ import sqlite3
 import time
 
 from .pm_documents import text_ranges
+from .pm_diagnostics import failure_details, safe_error
 from .pm_prompts import BOUNDARY, PROMPTS, OutputLimitError, PromptBudgetError
 from .pm_store import now, worker_lock
 from .pm_types import Settings, canonical_url, gate
@@ -77,13 +78,23 @@ class Engine:
         if hasattr(self.model, 'last_metrics'):
             self.model.last_metrics = {}
         status = 'MODEL_FAILED'
+        failure = {}
+        failure_stage = 'model_call'
         try:
             result = self.model.ask(role, payload, lambda: self.check(s['id']))
             self.check(s['id'])
+            failure_stage = 'role_result_validation'
             if not isinstance(result, dict):
                 raise ValueError('Role must return a JSON object')
             status = 'MODEL_COMPLETED'
             return result
+        except BaseException as exc:
+            phase=(failure_stage if failure_stage=='role_result_validation' else
+                   getattr(self.model,'last_metrics',{}).get('response_stage',failure_stage))
+            failure=failure_details(exc,phase)
+            if isinstance(exc,(ControlRequested,TimeLimitExceeded,KeyboardInterrupt)):
+                status='MODEL_CANCELLED'
+            raise
         finally:
             observed = getattr(self.model, 'last_metrics', {})
             actual = observed.get('prompt_eval_count')
@@ -93,9 +104,11 @@ class Engine:
                 s.setdefault('token_budget_scales', {})[role] = new
                 self.store.log(s['id'], 'BUDGET_CALIBRATED', json.dumps(
                     {'role': role, 'old_scale': old, 'new_scale': new, 'observed_input_tokens': actual}))
-            self.store.log(s['id'], status, json.dumps(dict(metrics, **{
-                k: v for k, v in observed.items() if k not in metrics},
-                call=s['calls'], role=role)))
+            record=dict(metrics)
+            record.update({k:v for k,v in observed.items() if k not in metrics})
+            record.update(call=s['calls'],role=role)
+            record.update(failure)
+            self.store.log(s['id'],status,json.dumps(record))
             self.store.save(s)
 
     def upgrade_budget_checkpoint(self, s):
@@ -521,7 +534,7 @@ class Engine:
             'limitations':['Local model extraction/review is provisional; inspect original sources and unresolved.md.']}
 
     def recover(self, s, stage, exc, cfg):
-        message = f'{type(exc).__name__}: {exc}'[:1500]
+        message = f'{type(exc).__name__}: {safe_error(exc)}'[:1500]
         s['last_error'] = message
         s['errors'] = s.get('errors',0)+1
         task = s['tasks'][s['active']] if s.get('active') is not None else None

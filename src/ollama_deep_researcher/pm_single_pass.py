@@ -1,6 +1,7 @@
 """Project-scoped source queue and durable model-result replay for v0.5."""
 import json
 from .pm_documents import text_ranges
+from .pm_diagnostics import safe_error
 from .pm_store import digest, now
 from .pm_types import Settings
 from .pm_budget import request_parts, FixedPromptBudgetError, preflight_research_start
@@ -11,12 +12,14 @@ EXTRACT_VERSION='extract-v05'
 
 
 class SinglePass:
+    extract_version = EXTRACT_VERSION
+    contract_version = 5
     @staticmethod
     def task_catalog(s):
         return [{'id':t['id'],'title':t['title'],'criteria':t['criteria']} for t in s['tasks']]
 
     def question(self,s,task=None):
-        return json.dumps([s['topic'],s['instructions'],self.task_catalog(s),s['settings']['model'],EXTRACT_VERSION],
+        return json.dumps([s['topic'],s['instructions'],self.task_catalog(s),s['settings']['model'],self.extract_version],
                           ensure_ascii=False,sort_keys=True)
 
     def upgrade_budget_checkpoint(self,s):
@@ -28,7 +31,7 @@ class SinglePass:
             if s.get('task_catalog_hash') not in (None,fingerprint):
                 raise ValueError('Frozen task catalogue changed; create a new project')
             if s.get('task_catalog_hash') is None:
-                preflight_research_start(Settings.from_saved(s['settings']),s['topic'],s['instructions'],self.task_catalog(s))
+                preflight_research_start(Settings.from_saved(s['settings']),s['topic'],s['instructions'],self.task_catalog(s),version=self.contract_version)
             s['task_catalog_hash']=fingerprint
 
     def enqueue(self,s,task,did):
@@ -46,7 +49,7 @@ class SinglePass:
         s['enqueued_documents'].append(did)
         queued={x['key'] for x in s.setdefault('document_queue',[])}
         for span in text_ranges(doc['body'],cfg.source_chars):
-            key=self.store.work_key(did,self.question(s),span['start'],span['end'],EXTRACT_VERSION)
+            key=self.store.work_key(did,self.question(s),span['start'],span['end'],self.extract_version)
             if key not in queued:
                 s['document_queue'].append(dict(did=did,key=key,start=span['start'],end=span['end'],attempts=0))
         if not doc['body']:
@@ -74,6 +77,9 @@ class SinglePass:
             task['evidence_ids']=self.store.task_evidence_ids(task['id'])
             task['reviewed_ids']=list(dict.fromkeys(task['reviewed_ids']))
 
+    def pending_search(self, task):
+        return bool(task.get('active_search_id'))
+
     def select(self,s,cfg):
         self.upgrade_budget_checkpoint(s)
         self._intake_references(s)
@@ -94,7 +100,7 @@ class SinglePass:
             index=(s.get('cursor',0)+offset)%len(tasks)
             task=tasks[index]
             pending=[x for x in task['evidence_ids'] if x not in task['reviewed_ids']]
-            if task.get('active_search_id'):
+            if self.pending_search(task):
                 # Finish a persisted batch before issuing a new query.
                 ready=(index,'research');break
             if task['review_queue'] or pending:
@@ -117,16 +123,16 @@ class SinglePass:
         overlap=min(80,(split_at-item['start'])//4)
         children=[]
         for start,end in ((item['start'],split_at),(split_at-overlap,item['end'])):
-            key=self.store.work_key(item['did'],self.question(s),start,end,EXTRACT_VERSION)
+            key=self.store.work_key(item['did'],self.question(s),start,end,self.extract_version)
             children.append(dict(did=item['did'],key=key,start=start,end=end,attempts=attempts))
         self.store.record_work(item['key'],'SPLIT',document_id=item['did'],start=item['start'],end=item['end'],
-            extractor_version=EXTRACT_VERSION,reason=reason,children=children,attempts=attempts)
+            extractor_version=self.extract_version,reason=reason,children=children,attempts=attempts)
         s['document_queue'][:1]=children
         s['stage']='select'
 
     def _fit(self,s,item,payload,cfg):
         def measure(end):
-            data=dict(payload,topic=s['topic'],instructions=s['instructions'],_pm_version=5,
+            data=dict(payload,topic=s['topic'],instructions=s['instructions'],_pm_version=self.contract_version,
                 source_text=payload['source_text'][:end-item['start']],
                 source_range={'start':item['start'],'end':end},
                 _pm_budget_scale=1.0)
@@ -168,7 +174,7 @@ class SinglePass:
                  'source_text':doc['body'][item['start']:item['end']],
                  'source_range':{'start':item['start'],'end':item['end']},
                  'max_claims':1 if item['attempts'] else 3}
-        data=dict(document_id=doc['id'],start=item['start'],end=item['end'],extractor_version=EXTRACT_VERSION,
+        data=dict(document_id=doc['id'],start=item['start'],end=item['end'],extractor_version=self.extract_version,
                   question=self.question(s),attempts=item['attempts'])
         if previous and previous['status']=='RESULT_READY':
             result=previous['result']
@@ -223,7 +229,7 @@ class SinglePass:
     def recover_extraction(self,s,exc):
         item=s['document_queue'][0]
         attempts=item['attempts']+1
-        message=f'{type(exc).__name__}: {exc}'[:1500]
+        message=f'{type(exc).__name__}: {safe_error(exc)}'[:1500]
         s['errors']=s.get('errors',0)+1;s['last_error']=message
         self.store.log(s['id'],'WORK_ERROR',json.dumps({'stage':'extract','document':item['did'],'error':message}))
         if isinstance(exc,FixedPromptBudgetError):
@@ -237,5 +243,5 @@ class SinglePass:
             status='FAILED';s['document_queue'].pop(0)
             metrics.record_extraction(self.store,item['key'],item['did'],item['start'],item['end'],'failed',0,[])
         self.store.record_work(item['key'],status,document_id=item['did'],start=item['start'],end=item['end'],
-                              extractor_version=EXTRACT_VERSION,error=message,attempts=attempts)
+                              extractor_version=self.extract_version,error=message,attempts=attempts)
         s['stage']='select'

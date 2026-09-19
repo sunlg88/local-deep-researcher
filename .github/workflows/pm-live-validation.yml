@@ -1,0 +1,72 @@
+name: PM opt-in live validation
+on:
+  push:
+    branches: ["feature/research-pm-v06-optimization"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  public-search:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[live-validation]') || contains(github.event.head_commit.message, '[search-validation]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PYTHONPATH: src
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install "ddgs==9.16.0" "httpx>=0.28.1" "charset-normalizer>=3.3,<4" "pypdf>=6,<7"
+      - name: Three actual public searches and bounded page fetches
+        run: python scripts/pm_live_validation.py search --output live-search.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pm-live-search-${{ github.sha }}
+          path: live-search.json
+          retention-days: 7
+  cpu-qwen-contract:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[live-validation]') || contains(github.event.head_commit.message, '[model-validation]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      PYTHONPATH: src
+      PYTHONUTF8: "1"
+      OLLAMA_HOST: "127.0.0.1:11434"
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_KEEP_ALIVE: "15m"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install "httpx>=0.28.1" "charset-normalizer>=3.3,<4" "pypdf>=6,<7"
+      - name: Pinned official Ollama in temporary CPU environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pm-ollama"
+          curl -fL --retry 2 --max-time 300 https://github.com/ollama/ollama/releases/download/v0.34.2/ollama-linux-amd64.tar.zst -o "$RUNNER_TEMP/ollama.tar.zst"
+          echo "e155b83589986d2c581fdbf1381ea3ebdb16549883679cd5a0627f7cdc05b12b  $RUNNER_TEMP/ollama.tar.zst" | sha256sum -c -
+          tar --zstd -xf "$RUNNER_TEMP/ollama.tar.zst" -C "$RUNNER_TEMP/pm-ollama"
+          rm "$RUNNER_TEMP/ollama.tar.zst"
+          OLLAMA_MODELS="$RUNNER_TEMP/pm-models" "$RUNNER_TEMP/pm-ollama/bin/ollama" serve > ollama-ci.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:11434/api/version; then break; fi
+            sleep 2
+          done
+          curl -fS --max-time 420 http://127.0.0.1:11434/api/pull -d '{"model":"qwen3.5:9b","stream":false}' > model-pull.json
+      - name: Actual model task binding, schema and exact-quote checks
+        run: python scripts/pm_model_focus_check.py --output live-model.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pm-live-model-${{ github.sha }}
+          path: |
+            live-model.json
+            model-pull.json
+            ollama-ci.log
+          retention-days: 7

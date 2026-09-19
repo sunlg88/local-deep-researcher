@@ -13,7 +13,8 @@ dependencies = [
     "langchain-community>=0.4.0",
     "tavily-python>=0.7.23",
     "langchain-ollama>=1.0.0",
-    "duckduckgo-search>=7.3.0",
+    "duckduckgo-search>=7.3.0",  # legacy v0.5 worker
+    "ddgs==9.16.0",  # explicit v0.6.2 search endpoint
     "langchain-openai>=1.1.14",
     "openai>=2.31.0",
     "httpx>=0.28.1",
