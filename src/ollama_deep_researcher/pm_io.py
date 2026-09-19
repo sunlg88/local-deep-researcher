@@ -220,7 +220,11 @@ class Ollama:
         started, content, total = time.monotonic(), [], 0
         check()
         self.last_metrics['response_stage']='transport_open'
-        with opener().open(request, timeout=min(cfg.request_timeout, 60)) as response:
+        # CPU/cold-load prompt evaluation can exceed 60s before the first byte.
+        # Respect the configured v0.6 inference deadline; retain legacy policy.
+        socket_timeout=cfg.request_timeout if payload.get('_pm_version')==6 else min(cfg.request_timeout,60)
+        self.last_metrics['socket_timeout_seconds']=socket_timeout
+        with opener().open(request, timeout=socket_timeout) as response:
             done = False
             for line in response:
                 check()
