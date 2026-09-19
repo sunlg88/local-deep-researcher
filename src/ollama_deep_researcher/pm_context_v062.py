@@ -8,6 +8,7 @@ OPTIONAL = ('evidence', 'attempt_feedback', 'previous_queries', 'known_domains',
 def fit_research_payload(cfg, payload, margin=256):
     repair=bool(payload.get('compact_retry'))
     core={k:deepcopy(v) for k,v in payload.items() if k not in OPTIONAL}
+    core['active_task']=payload.get('task','')
     original=request_parts(cfg,'researcher',payload)[2]
     base=request_parts(cfg,'researcher',core)[2]
     if base['estimated_input_tokens']>base['input_budget']:
@@ -29,6 +30,10 @@ def fit_research_payload(cfg, payload, margin=256):
                 view[field].pop(0 if field=='previous_queries' else -1);removed.append(field);break
         else:
             view=core;break
+    # Put the current task after broad project/history context. A global company
+    # list must not silently replace the task selected by the scheduler.
+    focus=view.pop('active_task',payload.get('task',''))
+    view['active_task']=focus
     final=request_parts(cfg,'researcher',view)[2]
     return view,dict(original_estimate=original['estimated_input_tokens'],bounded_estimate=final['estimated_input_tokens'],
         input_budget=final['input_budget'],repair=repair,question_preserved=True,audit_history_preserved=True,pruned_fields=sorted(set(removed)))

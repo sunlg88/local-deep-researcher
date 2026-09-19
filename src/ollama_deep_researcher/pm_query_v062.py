@@ -5,7 +5,9 @@ from .pm_query_policy import validate_intent, query_variants, _bounded
 
 LANGUAGES=('en','ko','ja','zh','de','fr','es','pt','ru','it','ar','auto')
 PROMPT=(
-    'Plan up to THREE separate web searches for ONE entity from the original question. '
+    'Plan up to THREE separate web searches for ONE entity in active_task. '
+    'active_task is the task selected NOW. The overall question may list other companies; '
+    'do NOT choose another company from that list. Keep the current task subject. '
     'Return only entity, search_phrases, constraints, language, site_hint. '
     'Each search_phrases item is ONE short topic (2-6 words), not a sentence, checklist or explanation. '
     'Different requested metrics go in DIFFERENT items, never concatenated. '

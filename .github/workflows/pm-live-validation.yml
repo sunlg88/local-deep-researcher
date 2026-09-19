@@ -28,7 +28,7 @@ jobs:
           path: live-search.json
           retention-days: 7
   cpu-qwen-contract:
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[live-validation]')
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[live-validation]') || contains(github.event.head_commit.message, '[model-validation]')
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -59,8 +59,8 @@ jobs:
             sleep 2
           done
           curl -fS --max-time 420 http://127.0.0.1:11434/api/pull -d '{"model":"qwen3.5:9b","stream":false}' > model-pull.json
-      - name: Actual model schema and exact-quote checks
-        run: python scripts/pm_live_validation.py model --output live-model.json
+      - name: Actual model task binding, schema and exact-quote checks
+        run: python scripts/pm_model_focus_check.py --output live-model.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
