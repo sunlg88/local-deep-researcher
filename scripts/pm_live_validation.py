@@ -39,15 +39,18 @@ def search_check(output):
             entry['hits']=[dict(h,eligible=d.accepted,score=d.score,reasons=d.reasons) for h,d in scored]
             selected=[h for h,d in scored if d.accepted and 'ENTITY_TOPIC_DEFERRED' not in d.reasons]
             entry['candidate_count']=len(selected)
-            if selected:
+            entry['fetch_attempts']=[]
+            for lead in selected[:3]:
                 try:
-                    doc=web.fetch_document(selected[0]['url'])
-                    entry['fetch']={'url':selected[0]['url'],'characters':len(doc.body),'metadata':doc.metadata}
-                except Exception as exc:entry['fetch_error']=failure_details(exc,'fetch')
+                    doc=web.fetch_document(lead['url'])
+                    entry['fetch']={'url':lead['url'],'characters':len(doc.body),'metadata':doc.metadata}
+                    entry['fetch_attempts'].append({'url':lead['url'],'status':'COLLECTED'})
+                    if doc.body:break
+                except Exception as exc:entry['fetch_attempts'].append({'url':lead['url'],'error':failure_details(exc,'fetch')})
             entry['status']='RESULTS' if hits else 'EMPTY'
         except Exception as exc:
-            entry['error']=failure_details(exc,'search');entry['status']='FAILED'
-        entry['seconds']=round(time.monotonic()-start,3);report['cases'].append(entry);write(output,report);time.sleep(3)
+            entry['error']=failure_details(exc,'search');entry['status']='FAILED';entry['provider']=dict(web.last_search_metadata)
+        entry['seconds']=round(time.monotonic()-start,3);report['cases'].append(entry);write(output,report);time.sleep(30)
     report['passed']=all(x.get('candidate_count',0)>0 for x in report['cases']);write(output,report);return report['passed']
 
 def model_check(output):

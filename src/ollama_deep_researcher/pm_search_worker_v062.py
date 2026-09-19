@@ -1,6 +1,6 @@
 """Explicit pinned DuckDuckGo endpoint, no hidden alternate engine or API cache."""
 from importlib.metadata import PackageNotFoundError, version
-import itertools
+from dataclasses import asdict
 import json
 import os
 from pathlib import Path
@@ -29,6 +29,29 @@ def provider_metadata(backend):
     return dict(library=package,library_version=installed,backend=backend,automatic_fallback=False,underlying_engines='server-managed')
 
 
+class SearchResponseError(RuntimeError):
+    def __init__(self,message,code=None,retry_after=''):
+        self.code=code
+        self.headers={'Retry-After':str(retry_after)} if retry_after else {}
+        super().__init__(message)
+
+
+def checked_response(response,meta):
+    code=response.status_code
+    text=response.text
+    meta['http_status']=code
+    meta['response_characters']=len(text)
+    low=text.casefold()
+    challenge=any(marker in low for marker in ('challenge-form','anomaly-modal','anomaly.js','captcha'))
+    if code!=200 or challenge:
+        # The upstream base class returns None for non-200, which turns access
+        # blocks into 'no results'. Preserve the actual status and back off.
+        headers=getattr(response,'headers',{}) or {}
+        delay=headers.get('Retry-After','30' if challenge or code in (202,403,429,503) else '')
+        raise SearchResponseError('Search endpoint refused or challenged the request; not an empty result',code,delay)
+    return text
+
+
 def execute(request):
     query=request.get('query');count=request.get('max_results');backend=request.get('backend')
     if not isinstance(query,str) or not 1<=len(query)<=4096 or type(count) is not int or not 1<=count<=30:
@@ -36,17 +59,26 @@ def execute(request):
     meta=provider_metadata(backend)
     if backend!='duckduckgo':
         reply=legacy_execute(request);reply['search_metadata']=meta;return reply
-    from ddgs import DDGS
-    with DDGS(timeout=15,verify=True) as client:
-        engines=client._get_engines('text','duckduckgo')
-        if not engines or any(e.name!='duckduckgo' or urlsplit(e.search_url).hostname!='html.duckduckgo.com' for e in engines):
-            raise RuntimeError('Unexpected search provider; refusing automatic fallback')
-        try:rows=list(itertools.islice(client.text(query,max_results=count,backend='duckduckgo',region='us-en'),count))
-        except Exception as exc:
-            if type(exc).__name__=='DDGSException' and str(exc)=='No results found.':
-                rows=[];meta['empty_result']=True
-            else:raise
-    return {'results':[normalize_hit(r) for r in rows],'search_metadata':meta}
+    from ddgs.engines.duckduckgo import Duckduckgo
+    if Duckduckgo.name!='duckduckgo' or urlsplit(Duckduckgo.search_url).hostname!='html.duckduckgo.com':
+        raise RuntimeError('Unexpected search provider; refusing automatic fallback')
+    class CheckedDuckduckgo(Duckduckgo):
+        last_html=''
+        def request(self,*args,**kwargs):
+            self.last_html=checked_response(self.http_client.request(*args,**kwargs),meta)
+            return self.last_html
+    engine=CheckedDuckduckgo(timeout=15,verify=True)
+    try:
+        rows=engine.search(query,region='us-en',page=1) or []
+        if not rows:
+            # Only a recognizable normal empty-results page is a success.
+            if not any(x in engine.last_html.casefold() for x in ('no-results','no results found','no more results')):
+                raise SearchResponseError('Search HTML could not be parsed into results; not a confirmed empty result',200)
+            meta['empty_result']=True
+        return {'results':[normalize_hit(asdict(r)) for r in rows[:count]],'search_metadata':meta}
+    except Exception as exc:
+        exc.search_metadata=meta
+        raise
 
 
 def main():
@@ -59,6 +91,6 @@ def main():
     except Exception as exc:
         reply=error_envelope(exc)
         if isinstance(exc,SearchDependencyError):reply['error']['action']='UPDATE_SEARCH_BACKEND.bat'
-        reply['search_metadata']=meta
+        reply['search_metadata']=getattr(exc,'search_metadata',meta)
     target.write_text(json.dumps(reply,ensure_ascii=False),encoding='utf-8')
 if __name__=='__main__':main()

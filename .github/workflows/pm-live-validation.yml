@@ -7,7 +7,7 @@ permissions:
   contents: read
 jobs:
   public-search:
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[live-validation]')
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[live-validation]') || contains(github.event.head_commit.message, '[search-validation]')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
