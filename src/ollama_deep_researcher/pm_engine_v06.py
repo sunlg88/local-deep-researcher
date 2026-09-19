@@ -6,6 +6,7 @@ from .pm_single_pass_v06 import SinglePassV06
 from .pm_search_cycle_v06 import SearchCycleV06
 from .pm_budget import calibration_key, request_parts, update_calibration
 from .pm_types import Settings
+from .pm_context_v062 import fit_research_payload
 from .pm_rate_limit_v06 import AdaptivePacer
 from . import pm_research_metrics as metrics
 from . import pm_v06_store as audit
@@ -25,6 +26,9 @@ class EngineV06(SinglePassV06,SearchCycleV06,EngineV05):
     def __init__(self,store,model,web,semantic_backend=None):
         if store.project_id is None or store.load(store.project_id).get('engine_version')!=6:
             raise ValueError('v0.6 requires a new engine_version=6 project; existing projects are unchanged')
+        if hasattr(web,'preflight'):
+            metadata=web.preflight()
+            store.log(store.project_id,'SEARCH_PROVIDER',json.dumps(metadata))
         super().__init__(store,model,web)
         audit.initialize(store)
         self.pacer=AdaptivePacer(store)
@@ -37,9 +41,9 @@ class EngineV06(SinglePassV06,SearchCycleV06,EngineV05):
 
     def upgrade_budget_checkpoint(self,s):
         super().upgrade_budget_checkpoint(s)
-        if s.get('hotfix_version')!='0.6.1':
-            s['hotfix_version']='0.6.1'
-            self.store.log(s['id'],'HOTFIX_POLICY',json.dumps({'version':'0.6.1',
+        if s.get('hotfix_version')!='0.6.2':
+            s['hotfix_version']='0.6.2'
+            self.store.log(s['id'],'HOTFIX_POLICY',json.dumps({'version':'0.6.2',
                 'engine_version':6,'context_tokens':s['settings']['context_tokens'],
                 'completed_work_preserved':True}))
 
@@ -49,9 +53,16 @@ class EngineV06(SinglePassV06,SearchCycleV06,EngineV05):
     def _ask(self,s,role,payload):
         payload.update(_pm_version=6,topic=s['topic'],instructions=s['instructions'])
         cfg=Settings.from_saved(s['settings'])
-        key=calibration_key(cfg,role,payload)
+        if role=='researcher': payload['_pm_search_contract']='v062'
+        profile_payload=({'topic':s['topic'],'instructions':s['instructions'],'task':payload.get('task','')} if role=='researcher' else payload)
+        key=calibration_key(cfg,role,profile_payload)
         previous=s.get('budget_calibration',{}).get(key,{})
         s.setdefault('token_budget_scales',{})[role]=previous.get('scale',1.0)
+        if role=='researcher':
+            payload['_pm_budget_scale']=previous.get('scale',1.0)
+            payload,info=fit_research_payload(cfg,payload)
+            if info['bounded_estimate']!=info['original_estimate']:
+                self.store.log(s['id'],'CONTEXT_COMPACTED',json.dumps(info))
         if hasattr(self.model,'last_metrics'): self.model.last_metrics={}
         success=False
         try:

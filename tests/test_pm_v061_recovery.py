@@ -83,7 +83,7 @@ class Recovery061(unittest.TestCase):
         pid,st,e=self.build();self.run_bounded(e,pid)
         events=[r for r in st.events(pid,500) if r['kind']=='HOTFIX_POLICY']
         self.assertEqual(len(events),1)
-        self.assertEqual(st.load(pid).get('hotfix_version'),'0.6.1')
+        self.assertEqual(st.load(pid).get('hotfix_version'),'0.6.2')
         self.assertEqual(st.load(pid)['engine_version'],6)
     def test_search_completion_exposes_soft_deferrals_separately_from_hard_rejects(self):
         pid,st,e=self.build(attempts=1)

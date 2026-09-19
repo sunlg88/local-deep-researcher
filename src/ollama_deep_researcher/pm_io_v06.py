@@ -23,7 +23,17 @@ def parse_search_reply(data):
 
 
 class WebV06(Web):
-    worker_module='ollama_deep_researcher.pm_search_worker_v06'
+    worker_module='ollama_deep_researcher.pm_search_worker_v062'
+
+    def preflight(self):
+        from .pm_search_worker_v062 import provider_metadata
+        self.last_search_metadata=provider_metadata(self.settings.search_api)
+        return dict(self.last_search_metadata)
+
+    def search(self,query):
+        self.preflight()
+        return super().search(query)
 
     def search_reply(self,data):
+        self.last_search_metadata=data.get('search_metadata',{}) if isinstance(data,dict) else {}
         return parse_search_reply(data)

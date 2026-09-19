@@ -133,15 +133,17 @@ class SinglePassV06(SinglePass):
         doc=self.store.document(did)
         focus=doc['metadata'].get('research_intent',{})
         focuses=[focus] if focus.get('entity') else []
-        if not focuses:
-            for t in s['tasks']:
-                try:
-                    item=json.loads(t.get('last_intent','{}'))
-                    if isinstance(item,dict) and item.get('entity'): focuses.append(item)
-                except (TypeError,ValueError): pass
-        if not focuses: return  # Missing context is not a licence to discard a source.
+        # A source may support another task than the search that discovered it.
+        for t in s['tasks']:
+            try:
+                item=json.loads(t.get('last_intent','{}'))
+                if isinstance(item,dict) and item.get('entity'): focuses.append(item)
+            except (TypeError,ValueError): pass
+        if not focuses: return
         text=doc['metadata'].get('fetched_title','')+' '+doc['body']
-        if any(focused_signal(f,text).plausible for f in focuses): return
+        # Topic-only signals permit exploration, not repeated reading after an
+        # actual negative extraction. Inspect the full original for entity tails.
+        if any(focused_signal(f,text).entity_present for f in focuses): return
         # Check the entire original, not just its first paragraph. A relevant tail,
         # uncertain result or prior evidence prevents this conservative early exit.
         spans=[(r['start'],r['end']) for r in self.store.processing()
@@ -168,6 +170,9 @@ class SinglePassV06(SinglePass):
         outcome=self.store.work(item['key'])
         if outcome and outcome['status']=='DONE' and outcome.get('relevance')=='irrelevant':
             self._defer_after_negative(s,item['did'])
+        if outcome and outcome['status']=='DONE':
+            queue=s.get('document_queue',[])
+            s['document_queue']=[x for x in queue if x['did']!=item['did']]+[x for x in queue if x['did']==item['did']]
 
     def _intake_references(self,s):
         if s.get('references_v06_scanned'): return

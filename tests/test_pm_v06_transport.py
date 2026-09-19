@@ -39,7 +39,7 @@ class Transport06(unittest.TestCase):
         from ollama_deep_researcher.pm_io import Web
         from ollama_deep_researcher.pm_io_v06 import WebV06
         self.assertEqual(Web.worker_module,'ollama_deep_researcher.pm_search_worker')
-        self.assertEqual(WebV06.worker_module,'ollama_deep_researcher.pm_search_worker_v06')
+        self.assertEqual(WebV06.worker_module,'ollama_deep_researcher.pm_search_worker_v062')
 
     def test_worker_bounds_results_and_retains_real_snippets(self):
         from ollama_deep_researcher.pm_search_worker_v06 import execute

@@ -9,6 +9,7 @@ from .pm_engine import BudgetExceeded, ControlRequested, TimeLimitExceeded
 from .pm_budget import FixedPromptBudgetError
 from .pm_prompts import OutputLimitError, PromptBudgetError
 from .pm_query_policy import validate_intent, query_variants, intent_anchors
+from .pm_query_v062 import query_proposals
 from .pm_search_quality import normalize_hit, parse_search_intent, score_hit, diversify_hits, HitDecision, near_duplicate_query, site_allows
 from .pm_fetch_quality import search_excerpt_key
 from .pm_focus_v061 import score_focused_hit
@@ -44,50 +45,53 @@ class SearchCycleV06:
         self.store.save(s)
         known=self._known_domains(cfg)
         context=self._query_context(s,task,cfg)
-        if task.get('intent_context_v061')==context and task.get('last_intent'):
-            try:
-                cached=validate_intent(json.loads(task['last_intent']),set(known))
-                available=self._unseen_variants(cached,task,cfg)
-            except (TypeError,ValueError):
-                available=[]
+        def unseen(entries):
+            rows=[entry for entry in entries if not any(near_duplicate_query(entry['query'],old) for old in task['queries'])]
+            return rows[:3] if cfg.optimization_mode=='quality' else rows[:1]
+        cached=task.get('query_candidates_v062',[])
+        if task.get('intent_context_v062')==context and cached:
+            available=unseen(cached)
             if available:
                 task['query_queue_v06']=available
+                task['last_intent']=json.dumps(available[0]['intent'],sort_keys=True,ensure_ascii=False)
                 self.store.log(s['id'],'QUERY_VARIANT_REUSED',json.dumps({'task':task['id'],
-                    'query':available[0]['query'],'model_called':False,'policy':'v061'}))
+                    'query':available[0]['query'],'model_called':False,'policy':'v062'}))
                 self.store.save(s)
                 return
         payload={'task':task['title'],'criteria':task['criteria'],'known_domains':known,
                  'previous_queries':task['queries'][-6:],'feedback':task['feedback'][-3:],
                  'attempt_feedback':self._task_feedback(task['id']),
                  'evidence':self.compact(self.store.get_evidence(task['evidence_ids'][-2:]))}
-        # A malformed semantic reply gets one concise retry, not an invented query.
         for retry in range(2):
             try:
                 data=self._ask(s,'researcher',dict(payload,compact_retry=bool(retry)))
-                intent=validate_intent(data,set(known))
+                entries=query_proposals(data,set(known))
                 break
             except (FixedPromptBudgetError,OutputLimitError,PromptBudgetError):
                 raise
             except ValueError as exc:
-                if retry: raise
+                if retry:raise
                 payload['feedback']=['Invalid structured intent: '+str(exc)]
                 self.store.log(s['id'],'INTENT_RETRY',json.dumps({'task':task['id'],'reason':str(exc)}))
-        signature=json.dumps(intent.to_dict(),sort_keys=True,ensure_ascii=False)
-        if task.get('last_intent') and task['last_intent']!=signature:
+        signature=json.dumps(data,sort_keys=True,ensure_ascii=False)
+        if task.get('proposal_signature_v062') and task['proposal_signature_v062']!=signature:
             task['strategy_changes']=task.get('strategy_changes',0)+1
-        task['last_intent']=signature
-        task['intent_context_v061']=context
-        task['query_queue_v06']=self._unseen_variants(intent,task,cfg)
-        if not task['query_queue_v06']:
+        task['proposal_signature_v062']=signature
+        task['search_proposal_v062']=data
+        task['query_candidates_v062']=entries
+        task['intent_context_v062']=context
+        task['query_queue_v06']=unseen(entries)
+        if task['query_queue_v06']:
+            task['last_intent']=json.dumps(task['query_queue_v06'][0]['intent'],sort_keys=True,ensure_ascii=False)
+            task['duplicate_intent_streak']=0
+        else:
             task['duplicate_intent_streak']=task.get('duplicate_intent_streak',0)+1
-            task['feedback']=['All variants of that intent were tried; choose a different information gap or entity.']
+            task['feedback']=['All proposed targets were tried; choose a different information gap or entity.']
             if task['duplicate_intent_streak']>=2:
                 task['attempts']=max(task['attempts'],cfg.max_attempts)
                 task['v06_stop']='STALLED'
             self.store.log(s['id'],'INTENT_EXHAUSTED',json.dumps({'task':task['id'],
                 'duplicate_streak':task['duplicate_intent_streak'],'search_called':False}))
-        else:
-            task['duplicate_intent_streak']=0
         self.store.save(s)
 
     def research(self,s,task,cfg):
@@ -152,6 +156,8 @@ class SearchCycleV06:
                            'query':attempt['query'],'executed_query':attempt['executed_query'],'backend':cfg.search_api}))
             try:
                 hits=self.web.search(attempt['query'])
+                if getattr(self.web,'last_search_metadata',None):
+                    self.store.log(s['id'],'SEARCH_PROVIDER',json.dumps(dict(self.web.last_search_metadata,attempt=aid)))
                 if not isinstance(hits,list): raise ValueError('Search adapter must return a list')
                 rows=[normalize_hit(h) for h in hits[:cfg.source_limit*3]]
                 metrics.save_search_results(self.store,aid,[(i,h,score_focused_hit(intent,h,cfg,attempt_focus)) for i,h in enumerate(rows)])

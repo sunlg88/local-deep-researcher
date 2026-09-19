@@ -50,6 +50,9 @@ def estimate_tokens(text, model='qwen3.5:9b'):
 def schema_for(role, payload):
     """Match the actual task/claim batch, not a global twenty-task schema."""
     schema = deepcopy(({5: V05_SCHEMAS, 6: V06_SCHEMAS}.get(payload.get('_pm_version'), SCHEMAS))[role])
+    if role == 'researcher' and payload.get('_pm_search_contract') == 'v062':
+        from .pm_query_v062 import SCHEMA
+        return deepcopy(SCHEMA)
     if role == 'planner':
         count = max(1, min(20, int(payload.get('max_tasks', 3))))
         items = schema['properties']['tasks']
@@ -75,6 +78,9 @@ def schema_for(role, payload):
 def request_parts(cfg, role, payload):
     """Render exactly the same text for both the engine and the HTTP boundary."""
     prompt = BOUNDARY + ({5: V05_PROMPTS, 6: V06_PROMPTS}.get(payload.get('_pm_version'), PROMPTS))[role]
+    if role == 'researcher' and payload.get('_pm_search_contract') == 'v062':
+        from .pm_query_v062 import PROMPT
+        prompt = BOUNDARY + PROMPT
     if payload.get('compact_retry'):
         prompt += ' Retry: return the smallest valid JSON answer, without long explanations.'
     public = {k: v for k, v in payload.items() if not k.startswith('_pm_')}
