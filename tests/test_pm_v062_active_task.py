@@ -12,7 +12,8 @@ class ActiveTask062(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             cfg=Settings(draft_enabled=False);w=Workspace(td)
             instruction='Investigate Sheffield Forgemasters, Japan Steel Works and Doosan Enerbility.'
-            pid=w.create_v06('Nuclear forging supply',cfg,instruction);st=w.open(pid);model=Model06()
+            pid=w.create_v06('Nuclear forging supply',cfg,instruction);st=w.open(pid);model=Model06(intents=[{'entity':'Doosan Enerbility','gap':'SMR supply',
+                'keywords':['SMR'],'strategy':'exact_entity','language':'en','site_hint':''}])
             engine=EngineV06(st,model,Web06(hits=[]))
             engine._ask(st.load(pid),'researcher',{'task':'Doosan Enerbility SMR supply','criteria':['supply records']})
             rendered=json.loads(request_parts(cfg,'researcher',model.payloads[-1][1])[1])

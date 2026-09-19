@@ -14,6 +14,8 @@ PROMPT=(
     'Example: {"entity":"Example Engineering","search_phrases":["maximum ingot weight",'
     '"SMR supply contract"],"constraints":[],"language":"en","site_hint":""}. '
     'Keep mandatory numeric/date/exclusion conditions in constraints; do not invent conditions. '
+    'Constraints are actual search restrictions (2026, 316H, not cancelled), never processing instructions. '
+    'Do not put preserve units, include year or distinguish rated versus actual into constraints. '
     'Use concise source-language search words, not task instructions or status. '
     'Keep entity names unambiguous; do not guess abbreviations or domains. '
     'site_hint is empty or a host from known_domains. No raw search operators or quotes. '
@@ -34,6 +36,7 @@ def query_proposals(data,known_domains):
         if not isinstance(phrases,list) or not 1<=len(phrases)<=3:raise ValueError('Provide 1..3 independent search_phrases')
         if not isinstance(constraints,list) or len(constraints)>4:raise ValueError('Provide at most 4 shared constraints')
         constraints=[_bounded(x,'constraint',80) for x in constraints]
+        constraints=[x for x in constraints if not is_processing_constraint(x)]
         lang=data['language'];site=data['site_hint']
     else:
         old=validate_intent(data,known_domains)
@@ -55,3 +58,51 @@ def query_proposals(data,known_domains):
             q=queries[variant];seen.add(q)
             entries.append(dict(query=q,intent=f.to_dict(),variant=variant,proposal=deepcopy(data),query_policy='atomic-v062'))
     return entries
+
+
+_GENERIC_NAME_WORDS = set('global nuclear small modular reactor manufacturing capabilities '
+    'supply chain equipment forging press capacity project records research comparison '
+    'technical specifications maximum ingot weight'.split())
+
+
+def task_entity(task, original_question):
+    """Bind only a unique literal proper name shared by task and original text.
+
+    This is not named-entity recognition or alias translation. Acronym-only,
+    generic, translated and multi-entity tasks deliberately remain unbound.
+    """
+    if not isinstance(task, str) or not isinstance(original_question, str):
+        return ''
+    tokens = list(re.finditer(r"[A-Za-z][A-Za-z0-9]*(?:[-'][A-Za-z0-9]+)*", task))
+    found = set()
+    for start in range(len(tokens)):
+        for end in range(start + 2, min(len(tokens), start + 8) + 1):
+            group = tokens[start:end]
+            words = [m.group() for m in group]
+            if not all(w[0].isupper() for w in words):
+                break
+            if not all(task[a.end():b.start()].isspace() for a,b in zip(group, group[1:])):
+                break
+            if all(w.isupper() for w in words) or not (set(w.lower() for w in words) - _GENERIC_NAME_WORDS):
+                continue
+            candidate = task[group[0].start():group[-1].end()]
+            if re.search(r'(?<!\w)' + re.escape(candidate) + r'(?!\w)', original_question):
+                found.add(candidate)
+    maximal = [name for name in found if not any(name != other and name in other for other in found)]
+    return maximal[0] if len(maximal) == 1 else ''
+
+
+def require_task_entity(data, expected):
+    if expected and (not isinstance(data, dict) or data.get('entity') != expected):
+        raise ValueError('Researcher entity does not match the current task subject: ' + expected)
+
+
+_PROCESSING_CONSTRAINT = re.compile(
+    r'(?:(?:please )?(?:preserve|retain|include|record|keep|report) '
+    r'(?:original )?(?:units?|years?|dates?|quotations?|citations?|sources?|conditions?)'
+    r'|distinguish rated (?:vs\.?|versus|and) actual)', re.I)
+
+
+def is_processing_constraint(value):
+    # Full match only: material, dates, thresholds and negative criteria stay.
+    return bool(_PROCESSING_CONSTRAINT.fullmatch(' '.join(value.split())))

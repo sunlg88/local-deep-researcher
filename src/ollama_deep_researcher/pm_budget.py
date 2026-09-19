@@ -52,7 +52,10 @@ def schema_for(role, payload):
     schema = deepcopy(({5: V05_SCHEMAS, 6: V06_SCHEMAS}.get(payload.get('_pm_version'), SCHEMAS))[role])
     if role == 'researcher' and payload.get('_pm_search_contract') == 'v062':
         from .pm_query_v062 import SCHEMA
-        return deepcopy(SCHEMA)
+        bounded = deepcopy(SCHEMA)
+        if payload.get('_pm_bound_entity'):
+            bounded['properties']['entity']['enum'] = [payload['_pm_bound_entity']]
+        return bounded
     if role == 'planner':
         count = max(1, min(20, int(payload.get('max_tasks', 3))))
         items = schema['properties']['tasks']

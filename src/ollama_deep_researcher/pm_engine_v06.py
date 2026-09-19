@@ -7,6 +7,7 @@ from .pm_search_cycle_v06 import SearchCycleV06
 from .pm_budget import calibration_key, request_parts, update_calibration
 from .pm_types import Settings
 from .pm_context_v062 import fit_research_payload
+from .pm_query_v062 import task_entity, require_task_entity
 from .pm_rate_limit_v06 import AdaptivePacer
 from . import pm_research_metrics as metrics
 from . import pm_v06_store as audit
@@ -50,10 +51,30 @@ class EngineV06(SinglePassV06,SearchCycleV06,EngineV05):
     def pending_search(self,task):
         return bool(task.get('active_search_id') or task.get('query_queue_v06'))
 
+    def research(self,s,task,cfg):
+        expected=task_entity(task.get('title',''),s['topic']+' '+s['instructions'])
+        queued=task.get('query_queue_v06') or []
+        if expected and queued:
+            try:
+                for entry in queued:
+                    require_task_entity(entry.get('intent',{}),expected)
+            except ValueError as exc:
+                task['query_queue_v06']=[]
+                task.pop('intent_context_v062',None)
+                task['feedback']=[str(exc)]
+                self.store.log(s['id'],'INTENT_RETIRED',json.dumps({'reason':str(exc),'search_called':False,
+                    'originals_and_completed_work_preserved':True}))
+                s['stage']='select'
+                self.store.save(s)
+                return
+        return super().research(s,task,cfg)
+
     def _ask(self,s,role,payload):
         payload.update(_pm_version=6,topic=s['topic'],instructions=s['instructions'])
         cfg=Settings.from_saved(s['settings'])
-        if role=='researcher': payload['_pm_search_contract']='v062'
+        if role=='researcher':
+            payload['_pm_search_contract']='v062'
+            payload['_pm_bound_entity']=task_entity(payload.get('task',''),s['topic']+' '+s['instructions'])
         profile_payload=({'topic':s['topic'],'instructions':s['instructions'],'task':payload.get('task','')} if role=='researcher' else payload)
         key=calibration_key(cfg,role,profile_payload)
         previous=s.get('budget_calibration',{}).get(key,{})
@@ -67,6 +88,8 @@ class EngineV06(SinglePassV06,SearchCycleV06,EngineV05):
         success=False
         try:
             result=Engine._ask(self,s,role,payload)
+            if role=='researcher':
+                require_task_entity(result,payload.get('_pm_bound_entity',''))
             success=True
             return result
         finally:

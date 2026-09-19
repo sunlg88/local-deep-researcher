@@ -12,7 +12,9 @@ if __name__=='__main__':
         if 'entity' in case:
             correct=case.get('response',{}).get('entity','').casefold()==case['entity'].casefold()
             case['correct_task_entity']=correct
-            case['passed']=bool(case.get('passed') and correct)
+            clean=all(not any(term in q.casefold() for term in ('preserve units','include year','preserve year','distinguish rated')) for q in case.get('queries',[]))
+            case['search_instruction_free']=clean
+            case['passed']=bool(case.get('passed') and correct and clean)
     report['passed']=len(report.get('cases',[]))==5 and all(case.get('passed') for case in report['cases'])
     report['task_binding_checked']=True
     write(args.output,report)
