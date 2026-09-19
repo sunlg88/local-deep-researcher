@@ -1,0 +1,16 @@
+Research PM 0.6.2 - recovery update for 0.6 / 0.6.1
+
+1. Stop and close PM. Back up the entire pm_data folder.
+2. Extract ZIP into the folder containing START_RESEARCH_PM.bat. Merge folders.
+   Do NOT delete pm_data or .pm-venv.
+3. Run UPDATE_SEARCH_BACKEND.bat ONCE. It installs ddgs==9.16.0, no model/data change.
+4. Run START_RESEARCH_PM.bat. Check window title Research PM 0.6.2.
+5. Use normal resume for an unfinished v0.6 research. No new project is required.
+
+Defaults: qwen3.5:9b / context8192 / output3072 / balanced / semantic off.
+Actual search library/version and explicit endpoint are recorded as SEARCH_PROVIDER.
+DuckDuckGo uses html.duckduckgo.com, not a hidden alternate search-engine fallback.
+This changes the adapter, so before/after tests are not identical-provider benchmarks.
+Public sites can rate limit; the app records failures rather than hiding them.
+Sources and original question are retained. Deferred sources are not proven irrelevant.
+Check docs/RESEARCH_PM_V0_6_2_RELIABILITY.md for tests and limitations.
